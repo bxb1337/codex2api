@@ -9201,6 +9201,7 @@ func (h *Handler) DeleteAPIKey(c *gin.Context) {
 // ==================== Settings ====================
 
 type settingsResponse struct {
+	ConcurrencyAccountingMode           string `json:"concurrency_accounting_mode"`
 	SiteName                            string `json:"site_name"`
 	SiteLogo                            string `json:"site_logo"`
 	BackgroundImage                     string `json:"background_image"`
@@ -9398,6 +9399,7 @@ type settingsResponse struct {
 type rawJSON = json.RawMessage
 
 type updateSettingsReq struct {
+	ConcurrencyAccountingMode           *string                          `json:"concurrency_accounting_mode"`
 	SiteName                            *string                          `json:"site_name"`
 	SiteLogo                            *string                          `json:"site_logo"`
 	BackgroundImage                     *string                          `json:"background_image"`
@@ -10221,6 +10223,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	modelCooldownSettings := h.store.GetModelCooldownSettings()
 	continuousRetryPolicy := h.store.GetContinuousRetryPolicy()
 	c.JSON(http.StatusOK, settingsResponse{
+		ConcurrencyAccountingMode:           proxy.CurrentRuntimeSettings().ConcurrencyAccountingMode,
 		antigravityOAuthSettingsView:        currentAntigravityOAuthSettingsView(),
 		SiteName:                            branding.SiteName,
 		SiteLogo:                            branding.SiteLogo,
@@ -10512,6 +10515,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	var req updateSettingsReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if !validateConcurrencyAccountingMode(c, req.ConcurrencyAccountingMode) {
 		return
 	}
 	if req.PromptFilterCustomPatternsExpected != nil && req.PromptFilterCustomPatterns == nil {
@@ -12089,6 +12095,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		responseCacheSettings = latest
 	}
 
+	if !h.commitConcurrencyAccountingMode(c, req.ConcurrencyAccountingMode) {
+		return
+	}
 	if h.store.GetAutoCleanUnauthorized() || h.store.GetAutoCleanRateLimited() || h.store.GetAutoCleanError() {
 		h.store.TriggerAutoCleanupAsync()
 	}
@@ -12104,6 +12113,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	modelCooldownSettings := h.store.GetModelCooldownSettings()
 
 	c.JSON(http.StatusOK, settingsResponse{
+		ConcurrencyAccountingMode:           proxy.CurrentRuntimeSettings().ConcurrencyAccountingMode,
 		antigravityOAuthSettingsView:        currentAntigravityOAuthSettingsView(),
 		SiteName:                            siteName,
 		SiteLogo:                            siteLogo,

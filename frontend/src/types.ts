@@ -2127,6 +2127,7 @@ export interface SystemSettings {
   background_glass_opacity: number
   background_glass_blur: number
   max_concurrency: number
+  concurrency_accounting_mode: 'legacy' | 'inference'
   global_rpm: number
   test_model: string
   test_content: string

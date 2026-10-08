@@ -2476,6 +2476,10 @@ export default function Settings() {
       description: t('settings.schedulerEngineIndexedDesc'),
     },
   ]
+  const concurrencyAccountingOptions = [
+    { label: t('settings.concurrencyAccountingLegacy'), value: 'legacy' },
+    { label: t('settings.concurrencyAccountingInference'), value: 'inference' },
+  ]
   const transportRetryPolicyOptions = [
     { label: t('settings.transportRetryPolicyRotate'), value: 'rotate' },
     { label: t('settings.transportRetryPolicySticky'), value: 'sticky' },
@@ -2579,6 +2583,7 @@ export default function Settings() {
     background_glass_opacity: 58,
     background_glass_blur: 5,
     max_concurrency: 2,
+    concurrency_accounting_mode: 'legacy',
     global_rpm: 0,
     test_model: '',
     test_content: 'hi',
@@ -5685,13 +5690,22 @@ export default function Settings() {
               <SettingsSection id="settings-traffic" title={t('settings.nav.traffic')} description={t('settings.nav.trafficDesc')} icon={<Gauge className="size-4" />}>
                 <SettingsCard title={t('settings.trafficProtection')} icon={<Gauge className="size-4" />} channels={ALL_UPSTREAM_CHANNELS}>
                   <div className={SETTINGS_FIELD_GRID}>
-                    <SettingField label={t('settings.maxConcurrency')} description={t('settings.maxConcurrencyRange')} suffix={t('settings.unit.concurrency')}>
-                      <DraftNumberInput
-                        min={1}
-                        value={settingsForm.max_concurrency}
-                        onValueChange={(value) => setSettingsForm(f => ({ ...f, max_concurrency: value }))}
-                      />
-                    </SettingField>
+                    <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2">
+                      <SettingField label={t('settings.maxConcurrency')} description={t('settings.maxConcurrencyRange')} suffix={t('settings.unit.concurrency')}>
+                        <DraftNumberInput
+                          min={1}
+                          value={settingsForm.max_concurrency}
+                          onValueChange={(value) => setSettingsForm(f => ({ ...f, max_concurrency: value }))}
+                        />
+                      </SettingField>
+                      <SettingField label={t('settings.concurrencyAccountingMode')} description={t('settings.concurrencyAccountingModeDesc')}>
+                        <SegmentedPillGroup
+                          value={settingsForm.concurrency_accounting_mode || 'legacy'}
+                          onChange={(value) => autoSaveStringField('concurrency_accounting_mode', value)}
+                          options={concurrencyAccountingOptions}
+                        />
+                      </SettingField>
+                    </div>
                     <SettingField label={t('settings.globalRpm')} description={t('settings.globalRpmRange')} suffix={t('settings.unit.rpm')}>
                       <DraftNumberInput
                         min={0}
