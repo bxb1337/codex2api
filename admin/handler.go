@@ -1744,6 +1744,7 @@ type accountResponse struct {
 	ClaudeUsageWindowsProbed      bool                        `json:"claude_usage_windows_probed,omitempty"` // 已跑过 OAuth usage 采样(前端据此只回填从未采样的旧行)
 	ActiveRequests                int64                       `json:"active_requests"`
 	OccupiedRequests              int64                       `json:"occupied_requests"`
+	ReclaimableSlots              int64                       `json:"reclaimable_buffered_requests"`
 	SessionSlotBufferEnabled      bool                        `json:"session_slot_buffer_enabled"`
 	TotalRequests                 int64                       `json:"total_requests"`
 	LastUsedAt                    string                      `json:"last_used_at"`

@@ -411,7 +411,8 @@ type Account struct {
 	RecentResultsCnt int       // 已记录数量（最大 20）
 
 	// 高并发调度指标（原子操作，无需锁）
-	ActiveRequests int64 // 当前正在执行的请求数
+	ActiveRequests   int64 // 当前正在执行的请求数
+	ReclaimableSlots int64 // 推理模式成功结束后的可回收缓冲数
 	// OccupiedRequests 包含当前请求和成功结束后为原会话保留的缓冲槽。
 	// 调度准入读取它；管理端仍分别展示真实在途与含缓冲占用。
 	OccupiedRequests int64
@@ -537,6 +538,7 @@ type AccountListRuntimeSnapshot struct {
 	LastTimeoutAt           time.Time
 	ActiveRequests          int64
 	OccupiedRequests        int64
+	ReclaimableSlots        int64
 	DynamicConcurrencyLimit int64
 	Reset5hAt               time.Time
 	Reset7dAt               time.Time
@@ -2283,6 +2285,7 @@ func (a *Account) GetAccountListRuntimeSnapshot() AccountListRuntimeSnapshot {
 		LastTimeoutAt:           a.LastTimeoutAt,
 		ActiveRequests:          atomic.LoadInt64(&a.ActiveRequests),
 		OccupiedRequests:        accountOccupiedRequests(a),
+		ReclaimableSlots:        atomic.LoadInt64(&a.ReclaimableSlots),
 		DynamicConcurrencyLimit: a.DynamicConcurrencyLimit,
 		Reset5hAt:               a.Reset5hAt,
 		Reset7dAt:               a.Reset7dAt,
@@ -3680,6 +3683,7 @@ type Store struct {
 	sessionSlotBufferNS           atomic.Int64
 	sessionSlotSequence           uint64
 	sessionSlotReservations       map[int64]map[string][]uint64
+	reclaimableSessionSlots       map[uint64]bool
 
 	globalAutoPause5hThreshold    float64  // protected by mu
 	globalAutoPause7dThreshold    float64  // protected by mu
@@ -6476,6 +6480,7 @@ func (s *Store) tryAcquireAccountWithFailure(acc *Account, limit int64, updateSc
 	if accountDispatchBlocked(acc) {
 		return false, accountAcquireFailureUnavailable
 	}
+	s.reclaimBufferedCapacity(acc, limit)
 	if !reserveOccupiedAccountSlot(acc, limit) {
 		if accountDispatchBlocked(acc) {
 			return false, accountAcquireFailureUnavailable
@@ -6673,7 +6678,7 @@ func (s *Store) NextExcludingWithDispatch(apiKeyID int64, exclude map[int64]bool
 				continue
 			}
 
-			load := accountOccupiedRequests(acc)
+			load := accountAdmissionLoad(acc)
 			tier, _, dispatchScore, limit := acc.schedulerSnapshotForPolicy(maxConcurrency, policy)
 			if limit <= 0 || load >= limit {
 				continue
@@ -6876,7 +6881,7 @@ func (s *Store) nextExcludingWithFilterLazy(apiKeyID int64, exclude map[int64]bo
 				continue
 			}
 
-			load := accountOccupiedRequests(acc)
+			load := accountAdmissionLoad(acc)
 			tier, _, dispatchScore, limit := acc.schedulerSnapshotForPolicy(maxConcurrency, policy)
 			if limit <= 0 || load >= limit {
 				continue
@@ -7274,7 +7279,7 @@ func (s *Store) nextAccountForFreshAffinityWithDispatch(key string, apiKeyID int
 		if filter != nil && !filter(acc) {
 			continue
 		}
-		load := accountOccupiedRequests(acc)
+		load := accountAdmissionLoad(acc)
 		tier, _, _, limit := acc.schedulerSnapshotForPolicy(maxConcurrency, policy)
 		if limit <= 0 || load >= limit {
 			continue
@@ -7738,7 +7743,7 @@ func (s *Store) CapacitySaturatedCandidateSummary(apiKeyID int64, exclude map[in
 			continue
 		}
 		// A free slot means selection failed for some other reason.
-		if accountOccupiedRequests(acc) < limit {
+		if accountAdmissionLoad(acc) < limit {
 			return summary
 		}
 		saturated++
@@ -8036,6 +8041,7 @@ func (s *Store) SetSessionSlotBufferEnabled(enabled bool) {
 		}
 	}
 	s.sessionSlotReservations = make(map[int64]map[string][]uint64)
+	s.reclaimableSessionSlots = nil
 	s.sessionMu.Unlock()
 
 	for _, acc := range s.accountSnapshotAccounts() {
@@ -8043,6 +8049,7 @@ func (s *Store) SetSessionSlotBufferEnabled(enabled bool) {
 			continue
 		}
 		if count := releasedByAccount[acc.DBID]; count > 0 {
+			atomic.StoreInt64(&acc.ReclaimableSlots, 0)
 			atomicSubtractFloorZero(&acc.OccupiedRequests, count)
 		}
 	}
@@ -8115,6 +8122,8 @@ func (s *Store) expireSessionSlot(acc *Account, sessionKey string, reservationID
 				continue
 			}
 			reservations = append(reservations[:i], reservations[i+1:]...)
+			s.removeReclaimableSlotLocked(acc, id)
+			atomicDecrementIfPositive(&acc.OccupiedRequests)
 			released = true
 			break
 		}
@@ -8129,7 +8138,6 @@ func (s *Store) expireSessionSlot(acc *Account, sessionKey string, reservationID
 	}
 	s.sessionMu.Unlock()
 	if released {
-		atomicDecrementIfPositive(&acc.OccupiedRequests)
 		s.notifySchedulerAccountAvailability(acc, false)
 	}
 }
@@ -8145,6 +8153,7 @@ func (s *Store) tryReclaimSessionSlot(acc *Account, sessionKey string, updateSch
 	if bySession := s.sessionSlotReservations[acc.DBID]; bySession != nil {
 		reservations := bySession[sessionKey]
 		if len(reservations) > 0 {
+			s.removeReclaimableSlotLocked(acc, reservations[0])
 			reservations = reservations[1:]
 			if len(reservations) == 0 {
 				delete(bySession, sessionKey)

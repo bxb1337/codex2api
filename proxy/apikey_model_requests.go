@@ -88,6 +88,9 @@ func (h *Handler) refreshAPIKeyModelRequestQuotaTurn(c *gin.Context) error {
 // boundary, after model mapping and validation. A transport failure after this
 // boundary is conservatively counted; retries share the durable charge ID.
 func ConsumeAPIKeyModelRequestQuota(ctx context.Context, model string) error {
+	if _, err := BeginInferenceRequest(ctx); err != nil {
+		return err
+	}
 	if ctx == nil {
 		return nil
 	}
