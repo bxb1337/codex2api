@@ -306,6 +306,7 @@ type responseConnBinding struct {
 	sessionKey string
 	accountID  int64
 	apiKey     string
+	model      string
 	expiresAt  time.Time
 }
 
@@ -508,6 +509,7 @@ func accountConnectionLimit(account *auth.Account) int {
 type idleAccountConnection struct {
 	wc       *WsConnection
 	lastUsed int64
+	bound    bool
 }
 
 // isOneShotPoolConn 判断连接是否挂在每请求唯一的 stateless 池键下（8 槽全忙时的
@@ -522,6 +524,9 @@ func isOneShotPoolConn(wc *WsConnection) bool {
 // 结果保住永远不会被按键复用的僵尸、逐出真正的热槽，拖垮复用率。
 func sortIdleForEviction(idle []idleAccountConnection) {
 	sort.Slice(idle, func(i, j int) bool {
+		if idle[i].bound != idle[j].bound {
+			return !idle[i].bound
+		}
 		oi, oj := isOneShotPoolConn(idle[i].wc), isOneShotPoolConn(idle[j].wc)
 		if oi != oj {
 			return oi
@@ -561,13 +566,13 @@ func (m *Manager) ensureAccountConnectionCapacity(accountID int64, limit int, pr
 		if !ok || wc == nil || wc.session == nil || wc.session.AccountID != accountID {
 			return true
 		}
-		if !wc.IsConnected() || wc.IsExpired() || isRotatableOverAge(wc) {
+		if wc.session.PendingCount() == 0 && (!wc.IsConnected() || wc.IsExpired() || isRotatableOverAge(wc)) {
 			stale = append(stale, wc)
 			return true
 		}
 		count++
 		if wc.PoolKey != protectedKey && wc.session.PendingCount() == 0 {
-			idle = append(idle, idleAccountConnection{wc: wc, lastUsed: wc.lastUsed.Load()})
+			idle = append(idle, idleAccountConnection{wc: wc, lastUsed: wc.lastUsed.Load(), bound: m.hasLiveResponseBinding(wc)})
 		}
 		return true
 	})
@@ -589,6 +594,7 @@ func (m *Manager) ensureAccountConnectionCapacity(accountID int64, limit int, pr
 		if current, ok := m.connections.Load(wc.PoolKey); !ok || current != wc {
 			continue
 		}
+		log.Printf("[WS] 空闲连接容量回收 account=%d bound=%t limit=%d", accountID, candidate.bound, limit)
 		m.DiscardConnection(wc)
 		count--
 	}
@@ -612,7 +618,7 @@ func (m *Manager) trimIdleAccountConnections(accountID int64, limit int, protect
 		}
 		count++
 		if wc != protected && wc.session.PendingCount() == 0 {
-			idle = append(idle, idleAccountConnection{wc: wc, lastUsed: wc.lastUsed.Load()})
+			idle = append(idle, idleAccountConnection{wc: wc, lastUsed: wc.lastUsed.Load(), bound: m.hasLiveResponseBinding(wc)})
 		}
 		return true
 	})
@@ -753,7 +759,7 @@ func (m *Manager) AcquireConnection(
 					if leaseErr == nil {
 						wc.account = account
 						wc.Touch()
-						m.trimIdleAccountConnections(account.ID(), accountConnectionLimit(account), wc)
+						m.trimIdleAccountConnections(account.ID(), accountConnectionLimitForContext(ctx, account), wc)
 						accountLock.Unlock()
 						lock.Unlock()
 						return wc, pr, nil
@@ -768,7 +774,7 @@ func (m *Manager) AcquireConnection(
 				lock.Unlock()
 				continue
 			}
-			if wc.IsConnected() && !wc.IsExpired() && wc.session != nil && wc.session.PendingCount() > 0 && !isRotatableOverAge(wc) {
+			if wc.session != nil && wc.session.PendingCount() > 0 {
 				lock.Unlock()
 				// 连接被同 session 的前一个请求占用：指数退避轮询等待其空闲，
 				// 累计等待超过上限则返回错误，避免无界阻塞与固定间隔空转抢锁。
@@ -804,7 +810,7 @@ func (m *Manager) AcquireConnection(
 			m.DiscardConnection(wc)
 		}
 		accountLock.Lock()
-		if !m.reserveAccountConnectionCapacity(account.ID(), accountConnectionLimit(account), key) {
+		if !m.reserveAccountConnectionCapacity(account.ID(), accountConnectionLimitForContext(ctx, account), key) {
 			accountLock.Unlock()
 			lock.Unlock()
 			if maxWait := busyAcquireMaxWait(); waited >= maxWait {
@@ -889,7 +895,7 @@ func (m *Manager) tryAcquireBusyOverflow(
 	proxyOverride string,
 ) (*WsConnection, *PendingRequest, bool) {
 	proxyURL := effectiveProxyURL(account, proxyOverride)
-	accountLimit := accountConnectionLimit(account)
+	accountLimit := accountConnectionLimitForContext(ctx, account)
 	accountLock, releaseAccountLock := m.accountLock(account.ID())
 	defer releaseAccountLock()
 	for i := 1; i <= BusyOverflowSlots; i++ {
@@ -921,7 +927,7 @@ func (m *Manager) tryAcquireBusyOverflow(
 					continue
 				}
 				m.DiscardConnection(wc)
-			} else if wc.IsConnected() && !wc.IsExpired() && wc.session != nil && wc.session.PendingCount() > 0 && !isRotatableOverAge(wc) {
+			} else if wc.session != nil && wc.session.PendingCount() > 0 {
 				// 兄弟槽位也在忙：换下一个槽位
 				lock.Unlock()
 				continue
@@ -1004,7 +1010,7 @@ func (m *Manager) AcquireReusableConnection(
 	proxyOverride string,
 ) (*WsConnection, *PendingRequest, string, error) {
 	proxyURL := effectiveProxyURL(account, proxyOverride)
-	accountLimit := accountConnectionLimit(account)
+	accountLimit := accountConnectionLimitForContext(ctx, account)
 	if slots < 1 || slots > accountLimit {
 		slots = accountLimit
 	}
@@ -1020,6 +1026,10 @@ func (m *Manager) AcquireReusableConnection(
 		if v, ok := m.connections.Load(key); ok {
 			wc := v.(*WsConnection)
 			if canReuseConnection(wc) {
+				if accountLimit > accountConnectionLimit(account) && m.hasLiveResponseBinding(wc) {
+					lock.Unlock()
+					continue
+				}
 				if m.probe(wc) {
 					accountLock.Lock()
 					current, exists := m.connections.Load(key)
@@ -1043,7 +1053,7 @@ func (m *Manager) AcquireReusableConnection(
 					continue
 				}
 				m.DiscardConnection(wc)
-			} else if !wc.IsConnected() || wc.IsExpired() || isRotatableOverAge(wc) || wc.session == nil || wc.session.PendingCount() == 0 {
+			} else if wc.session == nil || wc.session.PendingCount() == 0 {
 				m.DiscardConnection(wc)
 			}
 		}
@@ -1360,6 +1370,11 @@ func (m *Manager) evictResponseConnBindingsLocked(now time.Time) {
 
 // BindResponseConn 记录 response_id 由哪条连接产出（续链亲和）。
 func (m *Manager) BindResponseConn(responseID string, wc *WsConnection, sessionKey string, accountID int64, apiKey string) {
+	m.bindResponseConn(responseID, responseConnBinding{conn: wc, sessionKey: sessionKey, accountID: accountID, apiKey: apiKey})
+}
+
+func (m *Manager) bindResponseConn(responseID string, binding responseConnBinding) {
+	wc := binding.conn
 	responseID = strings.TrimSpace(responseID)
 	if m == nil || responseID == "" || wc == nil {
 		return
@@ -1378,18 +1393,19 @@ func (m *Manager) BindResponseConn(responseID string, wc *WsConnection, sessionK
 	if m.respConnBindings == nil {
 		m.respConnBindings = make(map[string]responseConnBinding, 64)
 	}
+	// store:false 只承诺连接上的最新响应可续链，旧绑定必须失效。
+	for id, binding := range m.respConnBindings {
+		if binding.conn == wc {
+			delete(m.respConnBindings, id)
+		}
+	}
 	// 有界保护：先清一轮过期项，仍超限则拒绝新增（旧绑定比新绑定更可能被续链）。
 	if len(m.respConnBindings) >= responseConnBindingMaxEntries {
 		m.evictResponseConnBindingsLocked(now)
 	}
 	if len(m.respConnBindings) < responseConnBindingMaxEntries {
-		m.respConnBindings[responseID] = responseConnBinding{
-			conn:       wc,
-			sessionKey: sessionKey,
-			accountID:  accountID,
-			apiKey:     apiKey,
-			expiresAt:  now.Add(responseConnBindingTTL),
-		}
+		binding.expiresAt = now.Add(responseConnBindingTTL)
+		m.respConnBindings[responseID] = binding
 	}
 }
 
@@ -1420,10 +1436,14 @@ func (m *Manager) lookupResponseConn(responseID string, accountID int64, apiKey 
 
 // AcquirePreferredConnection 尝试独占 response_id 绑定的原连接（续链亲和）。
 // 成功返回 (连接, pendingRequest, 池内 sessionKey)；绑定失效或连接忙时返回 nil，
-// 调用方回退到常规 acquire 路径。忙时不等待：续链上下文虽在原连接，但排队会
-// 阻塞在前一个长响应后面，且该场景（同会话并发续链）极少，退化为缓存 miss 更稳。
+// 此单次尝试保留兼容入口；生产续链通过 acquireContinuation 有界等待。
 func (m *Manager) AcquirePreferredConnection(responseID string, accountID int64, apiKey string) (*WsConnection, *PendingRequest, string) {
-	wc, sessionKey := m.lookupResponseConn(responseID, accountID, apiKey)
+	return m.acquirePreferredConnection(context.Background(), websocketContinuation{responseID: responseID, accountID: accountID, apiKey: apiKey})
+}
+
+func (m *Manager) acquirePreferredConnection(ctx context.Context, input websocketContinuation) (*WsConnection, *PendingRequest, string) {
+	accountID := input.accountID
+	wc, sessionKey := m.lookupContinuationConn(input)
 	if wc == nil {
 		return nil, nil, ""
 	}
@@ -1451,7 +1471,8 @@ func (m *Manager) AcquirePreferredConnection(responseID string, accountID int64,
 	// probe 期间连接被其它 pool key 的容量裁剪安全回收。
 	accountLock.Lock()
 	defer accountLock.Unlock()
-	if v, exists := m.connections.Load(wc.PoolKey); !exists || v != wc || !canReuseConnection(wc) {
+	current, _ := m.lookupContinuationConn(input)
+	if current != wc || !canReuseConnection(wc) {
 		return nil, nil, ""
 	}
 	pr, err := m.addPendingAndBeginReadLease(wc, sessionKey)
@@ -1461,7 +1482,7 @@ func (m *Manager) AcquirePreferredConnection(responseID string, accountID int64,
 	}
 	wc.Touch()
 	if wc.account != nil {
-		m.trimIdleAccountConnections(accountID, accountConnectionLimit(wc.account), wc)
+		m.trimIdleAccountConnections(accountID, accountConnectionLimitForContext(ctx, wc.account), wc)
 	}
 	return wc, pr, sessionKey
 }

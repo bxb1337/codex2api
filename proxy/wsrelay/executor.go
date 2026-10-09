@@ -188,8 +188,12 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	var err2 error
 	acquireStart := time.Now()
 	if prevRespID := strings.TrimSpace(gjson.GetBytes(wsBody, "previous_response_id").String()); prevRespID != "" {
-		if pwc, ppr, slotKey := e.acquireClientContinuation(websocketContinuation{responseID: prevRespID, accountID: account.ID(), apiKey: apiKey, identity: websocketClientIdentity(headers)}); pwc != nil {
-			wc, pr, poolSessionID = pwc, ppr, slotKey
+		wc, pr, poolSessionID, err2 = e.acquireContinuation(ctx, websocketContinuation{
+			responseID: prevRespID, accountID: account.ID(), apiKey: apiKey, identity: websocketClientIdentity(headers),
+			model: gjson.GetBytes(wsBody, "model").String(), url: wsURL, proxyURL: effectiveProxyURL(account, proxyOverride),
+		})
+		if err2 != nil {
+			return nil, err2
 		}
 	}
 	baseKey := strings.TrimSpace(poolRouteKey)
@@ -239,15 +243,18 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		return nil, err
 	}
 	sendErr := e.sendRequest(wc, wsBody, pr.RequestID)
+	if sendErr != nil && gjson.GetBytes(wsBody, "previous_response_id").String() != "" {
+		wc.session.RemovePendingRequest(pr.RequestID)
+		e.manager.DiscardConnection(wc)
+		proxy.FinishInferenceRequest(ctx)
+		return nil, &proxy.ResponsesContinuationLostError{Reason: "original_connection_send_failed"}
+	}
 	for retries := 0; shouldRetryWebsocketSendError(sendErr) && retries < 2; retries++ {
 		wc.session.RemovePendingRequest(pr.RequestID)
 		e.manager.DiscardConnection(wc)
 
-		// 短暂退避，避免瞬间重连风暴
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(time.Duration(retries+1) * 200 * time.Millisecond):
+		if err := waitWebsocketSendRetry(ctx, retries); err != nil {
+			return nil, err
 		}
 
 		reacquireStart := time.Now()
@@ -258,6 +265,11 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		}
 		if wc.upstreamUserAgentKnown {
 			proxy.RecordUpstreamUserAgent(ctx, wc.upstreamUserAgent)
+		}
+		if _, err := proxy.BeginInferenceRequest(ctx); err != nil {
+			wc.cancelUnsentReadLease(pr.RequestID)
+			wc.session.RemovePendingRequest(pr.RequestID)
+			return nil, err
 		}
 		sendErr = e.sendRequest(wc, wsBody, pr.RequestID)
 	}
@@ -276,6 +288,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		sessionID:      poolSessionID,
 		manager:        e.manager,
 		apiKey:         apiKey,
+		model:          gjson.GetBytes(wsBody, "model").String(),
 		readErrChan:    make(chan error, 1),
 		inferenceLease: proxy.CurrentInferenceRequest(ctx),
 	}, nil
@@ -453,6 +466,7 @@ func (e *Executor) sendRequest(wc *WsConnection, body []byte, requestID string) 
 // WsResponse WebSocket 响应包装器
 type WsResponse struct {
 	inferenceLease *proxy.InferenceRequestLease
+	model          string
 	conn           *WsConnection
 	pendingReq     *PendingRequest
 	sessionID      string
@@ -534,7 +548,9 @@ func (r *WsResponse) handleMessage(payload []byte, callback func(data []byte) bo
 			r.markConnBroken()
 		}
 		// 把错误内容作为 SSE 数据写给下游，让客户端看到完整错误 JSON。
-		callback(errEvent)
+		if !callback(errEvent) {
+			r.markConnBroken()
+		}
 		// 错误即终止：结束流(等价于 response.failed)。
 		return io.EOF
 	}
@@ -543,32 +559,31 @@ func (r *WsResponse) handleMessage(payload []byte, callback func(data []byte) bo
 	payload = normalizeCompletionEvent(payload)
 
 	// 上游终态先释放推理槽，本地转发和记账不占位。
-	if kind := gjson.GetBytes(payload, "type").String(); kind == "response.completed" || kind == "response.failed" {
+	eventType := gjson.GetBytes(payload, "type").String()
+	terminal := isReadLeaseTerminal(payload)
+	if terminal {
 		r.inferenceLease.Finish()
+	}
+	if eventType == "response.completed" || eventType == "response.incomplete" {
+		r.bindCompletedResponse(gjson.GetBytes(payload, "response.id").String())
+	}
+	if terminal {
+		// 下游读到终态即可取消请求；提前标记，避免取消回调误销毁已完成连接。
+		r.markStreamCompleted()
 	}
 	// 调用回调
 	if !callback(payload) {
 		// 下游写入失败(broken pipe / 客户端断开)：响应流在非终止边界被截断，
 		// 上游仍会在这条连接上继续推送本响应的剩余帧。连接必须销毁，
 		// 归还池中复用会把残留帧串给下一个请求(issue #308)。
-		r.markConnBroken()
+		if !terminal {
+			r.markConnBroken()
+		}
 		return io.EOF
 	}
 
 	// 检查是否是终止事件
-	eventType := gjson.GetBytes(payload, "type").String()
-	if eventType == "response.completed" || eventType == "response.failed" {
-		// 续链亲和：记录本响应由哪条连接产出，后续带 previous_response_id 的
-		// 请求可回到原连接（上游无服务端存储时上下文只存活在连接内）。
-		if eventType == "response.completed" && r.manager != nil && r.conn != nil {
-			if respID := gjson.GetBytes(payload, "response.id").String(); respID != "" {
-				accountID := int64(0)
-				if r.conn.session != nil {
-					accountID = r.conn.session.AccountID
-				}
-				r.manager.BindResponseConn(respID, r.conn, r.sessionID, accountID, r.apiKey)
-			}
-		}
+	if terminal {
 		return io.EOF
 	}
 
@@ -657,6 +672,9 @@ func (r *WsResponse) markConnBroken() {
 	r.mu.Lock()
 	r.connBroken = true
 	r.mu.Unlock()
+	if r.manager != nil && r.conn != nil {
+		r.manager.DiscardConnection(r.conn)
+	}
 }
 
 // markStreamCompleted 标记读流已消费到明确的终止边界（幂等，受 mu 保护）。
