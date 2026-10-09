@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"log"
 	"sync/atomic"
 	"time"
 )
@@ -122,6 +123,7 @@ func (s *Store) reclaimOldestBufferedSlotLocked(acc *Account) bool {
 	}
 	s.removeReclaimableSlotLocked(acc, oldest)
 	atomicDecrementIfPositive(&acc.OccupiedRequests)
+	log.Printf("推理会话缓冲让位 account=%d reservation=%d", acc.DBID, oldest)
 	return true
 }
 
