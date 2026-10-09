@@ -166,6 +166,7 @@ func doTracedUpstreamRequest(client *http.Client, req *http.Request, account *au
 	if err != nil {
 		return nil, err
 	}
+	req = req.WithContext(lease.upstreamContext(req.Context()))
 	record := beginUpstreamTrace(req.Context(), account, proxyURL, false)
 	resp, err := client.Do(req)
 	if err != nil {

@@ -281,6 +281,8 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 
 	// 启动心跳
 	e.manager.StartHeartbeat(wc)
+	activeConnection := wc
+	proxy.CurrentInferenceRequest(ctx).OnSharedLoss(func() { e.manager.DiscardConnection(activeConnection) })
 
 	return &WsResponse{
 		conn:           wc,

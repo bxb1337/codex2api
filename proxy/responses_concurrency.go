@@ -35,6 +35,7 @@ type InferenceRequestLease struct {
 	store        *auth.Store
 	releaseKey   func()
 	releaseScope func()
+	shared       *sharedInferenceLease
 }
 
 func (lease *InferenceRequestLease) Finish() {
@@ -43,6 +44,7 @@ func (lease *InferenceRequestLease) Finish() {
 	}
 	lease.once.Do(func() {
 		lease.finishing.Store(true)
+		lease.shared.release()
 		if lease.releaseScope != nil {
 			lease.releaseScope()
 		}
@@ -120,7 +122,7 @@ func (state *responsesInference) finish() {
 	lease.Finish()
 }
 
-func (state *responsesInference) begin() (*InferenceRequestLease, error) {
+func (state *responsesInference) begin(ctx context.Context) (*InferenceRequestLease, error) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if state.current != nil && !state.current.done.Load() {
@@ -132,11 +134,17 @@ func (state *responsesInference) begin() (*InferenceRequestLease, error) {
 	if state.selected == nil {
 		return nil, ErrNoAvailableAccount()
 	}
-	releaseKey, err := state.acquireKey()
+	shared, err := state.acquireSharedConcurrency(ctx)
 	if err != nil {
 		return nil, err
 	}
+	releaseKey, err := state.acquireKey()
+	if err != nil {
+		shared.release()
+		return nil, err
+	}
 	if !state.handler.store.AcquireInferenceAccount(state.selected, state.options) {
+		shared.release()
 		if releaseKey != nil {
 			releaseKey()
 		}
@@ -144,9 +152,10 @@ func (state *responsesInference) begin() (*InferenceRequestLease, error) {
 	}
 	state.handler.acquireAPIKeyScopeConcurrency(state.client, state.selected)
 	state.current = &InferenceRequestLease{
-		account: state.selected, store: state.handler.store, releaseKey: releaseKey, finished: make(chan struct{}),
+		account: state.selected, store: state.handler.store, releaseKey: releaseKey, shared: shared, finished: make(chan struct{}),
 		releaseScope: func() { state.handler.ReleaseAPIKeyScopeConcurrency(state.client) },
 	}
+	shared.start(state.current)
 	return state.current, nil
 }
 
@@ -179,7 +188,7 @@ func BeginInferenceRequest(ctx context.Context) (*InferenceRequestLease, error) 
 		return nil, ctx.Err()
 	}
 	if state := responsesInferenceFromContext(ctx); state != nil {
-		return state.begin()
+		return state.begin(ctx)
 	}
 	return nil, nil
 }

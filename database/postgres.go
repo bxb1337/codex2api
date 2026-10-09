@@ -200,9 +200,10 @@ type sqlExecer interface {
 
 // DB PostgreSQL 数据库操作
 type DB struct {
-	conn           *sql.DB
-	driver         string
-	authCacheScope string
+	conn              *sql.DB
+	driver            string
+	authCacheScope    string
+	runtimeCacheScope string
 
 	promptFilterAudit *promptFilterAuditQueue
 
@@ -512,6 +513,11 @@ func New(driver string, dsn string, schema ...string) (*DB, error) {
 		backgroundTaskCancel()
 		_ = conn.Close()
 		return nil, fmt.Errorf("初始化鉴权缓存修订表失败: %w", err)
+	}
+	if err := db.initializeRuntimeCacheScope(ctx); err != nil {
+		backgroundTaskCancel()
+		_ = conn.Close()
+		return nil, fmt.Errorf("初始化共享运行态作用域失败: %w", err)
 	}
 	// 启动批量写入后台协程
 	db.startLogFlusher()

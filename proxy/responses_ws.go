@@ -814,7 +814,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				}
 				var proxyErr *Error
 				if errors.As(reqErr, &proxyErr) {
-					_ = writeResponsesWSError(conn, api.NewAPIError(api.ErrorCode(proxyErr.Code), proxyErr.Message, api.ErrorTypeRateLimit))
+					_ = writeResponsesWSError(conn, api.NewAPIError(api.ErrorCode(proxyErr.Code), proxyErr.Message, api.ErrorType(proxyErr.Type)))
 				}
 				return nil
 			}

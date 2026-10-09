@@ -30,7 +30,7 @@ func (s *Store) NextInferenceCandidate(options InferenceCandidateOptions) Infere
 	if bound {
 		account := s.inferenceAccountByID(binding.accountID)
 		if s.inferenceAccountEligible(account, options) {
-			if accountAdmissionLoad(account) < s.inferenceAccountLimit(account, options) {
+			if accountAdmissionLoad(account) < s.InferenceAccountLimit(account, options) {
 				return InferenceCandidate{Account: account, ProxyURL: binding.proxyURL}
 			}
 			guard = SessionAffinityGuard{preserveAccountID: binding.accountID}
@@ -82,7 +82,8 @@ func (s *Store) inferenceBinding(options InferenceCandidateOptions) (sessionAffi
 	return binding, true
 }
 
-func (s *Store) inferenceAccountLimit(account *Account, options InferenceCandidateOptions) int64 {
+// InferenceAccountLimit 返回最终准入使用的动态上限，供共享并发协调复用。
+func (s *Store) InferenceAccountLimit(account *Account, options InferenceCandidateOptions) int64 {
 	base := s.maxConcurrency.Load()
 	if options.PreserveBinding && account.UsageLimitContinuationEligible() {
 		_, _, limit, _, _ := account.fastSchedulerSnapshotForContinuation(base, time.Now())
@@ -99,7 +100,7 @@ func (s *Store) inferenceAccountEligible(account *Account, options InferenceCand
 	}
 	continuation := options.PreserveBinding && account.UsageLimitContinuationEligible()
 	if continuation {
-		return s.inferenceAccountLimit(account, options) > 0
+		return s.InferenceAccountLimit(account, options) > 0
 	}
 	if !account.dispatchableForPolicy(options.Policy) || s.accountHasBlockingCachedCooldown(account, options.Policy) {
 		return false
@@ -108,13 +109,13 @@ func (s *Store) inferenceAccountEligible(account *Account, options InferenceCand
 		return false
 	}
 	_, _, _, _, available := account.fastSchedulerSnapshotForPolicy(s.maxConcurrency.Load(), time.Now(), options.Policy)
-	return available && s.inferenceAccountLimit(account, options) > 0
+	return available && s.InferenceAccountLimit(account, options) > 0
 }
 
 func (s *Store) scanInferenceCandidate(options InferenceCandidateOptions) *Account {
 	var best *Account
 	for _, account := range s.accountSnapshotAccounts() {
-		if !s.inferenceAccountEligible(account, options) || accountAdmissionLoad(account) >= s.inferenceAccountLimit(account, options) {
+		if !s.inferenceAccountEligible(account, options) || accountAdmissionLoad(account) >= s.InferenceAccountLimit(account, options) {
 			continue
 		}
 		if best == nil || s.inferenceCandidateBetter(account, best) {
@@ -145,7 +146,7 @@ func (s *Store) AcquireInferenceAccount(account *Account, options InferenceCandi
 	if !s.inferenceAccountEligible(account, options) {
 		return false
 	}
-	limit := s.inferenceAccountLimit(account, options)
+	limit := s.InferenceAccountLimit(account, options)
 	if account.GetActiveRequests() >= limit {
 		return false
 	}
