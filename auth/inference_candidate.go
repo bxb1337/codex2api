@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"sync/atomic"
 	"time"
 )
 
@@ -84,7 +83,7 @@ func (s *Store) inferenceBinding(options InferenceCandidateOptions) (sessionAffi
 }
 
 func (s *Store) inferenceAccountLimit(account *Account, options InferenceCandidateOptions) int64 {
-	base := atomic.LoadInt64(&s.maxConcurrency)
+	base := s.maxConcurrency.Load()
 	if options.PreserveBinding && account.UsageLimitContinuationEligible() {
 		_, _, limit, _, _ := account.fastSchedulerSnapshotForContinuation(base, time.Now())
 		return limit
@@ -108,7 +107,7 @@ func (s *Store) inferenceAccountEligible(account *Account, options InferenceCand
 	if s.GetLazyMode() && !s.ensureLazyDispatchReady(account) {
 		return false
 	}
-	_, _, _, _, available := account.fastSchedulerSnapshotForPolicy(atomic.LoadInt64(&s.maxConcurrency), time.Now(), options.Policy)
+	_, _, _, _, available := account.fastSchedulerSnapshotForPolicy(s.maxConcurrency.Load(), time.Now(), options.Policy)
 	return available && s.inferenceAccountLimit(account, options) > 0
 }
 
@@ -129,7 +128,7 @@ func (s *Store) inferenceCandidateBetter(candidate, current *Account) bool {
 	if priority, old := candidate.schedulerPriority(), current.schedulerPriority(); priority != old {
 		return priority > old
 	}
-	base := atomic.LoadInt64(&s.maxConcurrency)
+	base := s.maxConcurrency.Load()
 	tier, _, score, _ := candidate.schedulerSnapshot(base)
 	oldTier, _, oldScore, _ := current.schedulerSnapshot(base)
 	if tierPriority(tier) != tierPriority(oldTier) {

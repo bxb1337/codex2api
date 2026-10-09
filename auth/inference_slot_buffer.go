@@ -2,7 +2,6 @@ package auth
 
 import (
 	"log"
-	"sync/atomic"
 	"time"
 )
 
@@ -16,7 +15,7 @@ func accountAdmissionLoad(acc *Account) int64 {
 	if acc == nil {
 		return 0
 	}
-	load := accountOccupiedRequests(acc) - atomic.LoadInt64(&acc.ReclaimableSlots)
+	load := accountOccupiedRequests(acc) - acc.ReclaimableSlots.Load()
 	if active := acc.GetActiveRequests(); load < active {
 		return active
 	}
@@ -32,7 +31,7 @@ func (s *Store) BufferInferenceSession(acc *Account, options InferenceSessionBuf
 	}
 	limit := acc.GetDynamicConcurrencyLimit()
 	if limit <= 0 {
-		_, _, _, limit = acc.schedulerSnapshot(atomic.LoadInt64(&s.maxConcurrency))
+		_, _, _, limit = acc.schedulerSnapshot(s.maxConcurrency.Load())
 	}
 	s.sessionMu.Lock()
 	if !s.SessionSlotBufferEnabled() || !reserveBufferedAccountSlot(acc, limit) {
@@ -54,7 +53,7 @@ func (s *Store) BufferInferenceSession(acc *Account, options InferenceSessionBuf
 	}
 	bySession[options.SessionKey] = append(bySession[options.SessionKey], id)
 	s.reclaimableSessionSlots[id] = true
-	atomic.AddInt64(&acc.ReclaimableSlots, 1)
+	acc.ReclaimableSlots.Add(1)
 	s.sessionMu.Unlock()
 	time.AfterFunc(buffer, func() { s.expireSessionSlot(acc, options.SessionKey, id) })
 	s.notifySchedulerAccountAvailability(acc, true)
@@ -62,11 +61,11 @@ func (s *Store) BufferInferenceSession(acc *Account, options InferenceSessionBuf
 
 func reserveBufferedAccountSlot(acc *Account, limit int64) bool {
 	for !accountDispatchBlocked(acc) && limit > 0 {
-		occupied := atomic.LoadInt64(&acc.OccupiedRequests)
+		occupied := acc.OccupiedRequests.Load()
 		if occupied >= limit {
 			return false
 		}
-		if atomic.CompareAndSwapInt64(&acc.OccupiedRequests, occupied, occupied+1) {
+		if acc.OccupiedRequests.CompareAndSwap(occupied, occupied+1) {
 			return true
 		}
 	}
@@ -82,7 +81,7 @@ func (s *Store) removeReclaimableSlotLocked(acc *Account, id uint64) {
 }
 
 func (s *Store) reclaimBufferedCapacity(acc *Account, limit int64) {
-	if atomic.LoadInt64(&acc.ReclaimableSlots) == 0 || accountOccupiedRequests(acc) < limit {
+	if acc.ReclaimableSlots.Load() == 0 || accountOccupiedRequests(acc) < limit {
 		return
 	}
 	s.sessionMu.Lock()
@@ -128,5 +127,5 @@ func (s *Store) reclaimOldestBufferedSlotLocked(acc *Account) bool {
 }
 
 func (account *Account) GetReclaimableSlots() int64 {
-	return atomic.LoadInt64(&account.ReclaimableSlots)
+	return account.ReclaimableSlots.Load()
 }
