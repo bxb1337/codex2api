@@ -5,8 +5,25 @@ import (
 	"log"
 	"time"
 
+	"github.com/codex2api/auth"
+	"github.com/codex2api/database"
 	"github.com/codex2api/proxy"
 )
+
+const inferenceIdleConnectionHeadroom = 8
+
+func accountConnectionLimitForContext(ctx context.Context, account *auth.Account) int {
+	return accountConnectionLimitForMode(account, proxy.ResponsesConcurrencyMode(ctx))
+}
+
+func accountConnectionLimitForMode(account *auth.Account, mode string) int {
+	limit := accountConnectionLimit(account)
+	maxInt := int(^uint(0) >> 1)
+	if mode == database.ConcurrencyAccountingInference && limit <= maxInt-inferenceIdleConnectionHeadroom {
+		return limit + inferenceIdleConnectionHeadroom
+	}
+	return limit
+}
 
 // acquireContinuation 只等待原连接；绑定失效后由调用方恢复完整上下文。
 func (e *Executor) acquireContinuation(ctx context.Context, input websocketContinuation) (*WsConnection, *PendingRequest, string, error) {
@@ -23,10 +40,10 @@ func (e *Executor) acquireContinuation(ctx context.Context, input websocketConti
 		if wc == nil {
 			return nil, nil, "", &proxy.ResponsesContinuationLostError{Reason: "original_connection_unavailable"}
 		}
-		connection, pending, key := e.manager.acquirePreferredConnection(input)
+		connection, pending, key := e.manager.acquirePreferredConnection(ctx, input)
 		if connection != nil {
 			if waited {
-				log.Printf("[WS] 续链等待后复用原连接 account=%d waited_ms=%d", input.accountID, time.Since(start).Milliseconds())
+				log.Printf("[WS] 续链等待后复用原连接 account=%d mode=%s waited_ms=%d", input.accountID, proxy.ResponsesConcurrencyMode(ctx), time.Since(start).Milliseconds())
 			}
 			return connection, pending, key, nil
 		}
@@ -65,8 +82,9 @@ func (m *Manager) lookupContinuationConn(input websocketContinuation) (*WsConnec
 	return wc, key
 }
 
-// 发送失败后可取消地退避，避免瞬间重连风暴。
+// backoff 期间不占推理槽，下一次发送重新执行准入。
 func waitWebsocketSendRetry(ctx context.Context, retry int) error {
+	proxy.FinishInferenceRequest(ctx)
 	const sendRetryBackoff = 200 * time.Millisecond
 	timer := time.NewTimer(time.Duration(retry+1) * sendRetryBackoff)
 	defer timer.Stop()

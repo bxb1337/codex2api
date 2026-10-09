@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/database"
 	"github.com/codex2api/proxy"
 )
 
@@ -177,9 +178,13 @@ func TestIncompleteResponseEndsReadLeaseAndBinds(t *testing.T) {
 	}
 }
 
-func TestContinuationConnectionCapacityProtectsActiveAndBound(t *testing.T) {
+func TestInferenceConnectionCapacityProtectsActiveAndBound(t *testing.T) {
 	executor, bound := continuationFixture(t)
 	manager := executor.manager
+	account := &auth.Account{DBID: 7, DynamicConcurrencyLimit: 1}
+	if 1 != accountConnectionLimitForMode(account, database.ConcurrencyAccountingLegacy) || 9 != accountConnectionLimitForMode(account, database.ConcurrencyAccountingInference) {
+		t.Fatal("incorrect connection capacity for accounting mode")
+	}
 	active := newBoundTestConn(t, manager, 7, "active")
 	active.session.AddPendingRequest("active")
 	active.lastUsed.Store(time.Now().Add(-2 * connectionIdleTimeout()).UnixNano())

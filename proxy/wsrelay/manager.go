@@ -759,7 +759,7 @@ func (m *Manager) AcquireConnection(
 					if leaseErr == nil {
 						wc.account = account
 						wc.Touch()
-						m.trimIdleAccountConnections(account.ID(), accountConnectionLimit(account), wc)
+						m.trimIdleAccountConnections(account.ID(), accountConnectionLimitForContext(ctx, account), wc)
 						accountLock.Unlock()
 						lock.Unlock()
 						return wc, pr, nil
@@ -810,7 +810,7 @@ func (m *Manager) AcquireConnection(
 			m.DiscardConnection(wc)
 		}
 		accountLock.Lock()
-		if !m.reserveAccountConnectionCapacity(account.ID(), accountConnectionLimit(account), key) {
+		if !m.reserveAccountConnectionCapacity(account.ID(), accountConnectionLimitForContext(ctx, account), key) {
 			accountLock.Unlock()
 			lock.Unlock()
 			if maxWait := busyAcquireMaxWait(); waited >= maxWait {
@@ -895,7 +895,7 @@ func (m *Manager) tryAcquireBusyOverflow(
 	proxyOverride string,
 ) (*WsConnection, *PendingRequest, bool) {
 	proxyURL := effectiveProxyURL(account, proxyOverride)
-	accountLimit := accountConnectionLimit(account)
+	accountLimit := accountConnectionLimitForContext(ctx, account)
 	accountLock, releaseAccountLock := m.accountLock(account.ID())
 	defer releaseAccountLock()
 	for i := 1; i <= BusyOverflowSlots; i++ {
@@ -1010,7 +1010,7 @@ func (m *Manager) AcquireReusableConnection(
 	proxyOverride string,
 ) (*WsConnection, *PendingRequest, string, error) {
 	proxyURL := effectiveProxyURL(account, proxyOverride)
-	accountLimit := accountConnectionLimit(account)
+	accountLimit := accountConnectionLimitForContext(ctx, account)
 	if slots < 1 || slots > accountLimit {
 		slots = accountLimit
 	}
@@ -1026,6 +1026,10 @@ func (m *Manager) AcquireReusableConnection(
 		if v, ok := m.connections.Load(key); ok {
 			wc := v.(*WsConnection)
 			if canReuseConnection(wc) {
+				if accountLimit > accountConnectionLimit(account) && m.hasLiveResponseBinding(wc) {
+					lock.Unlock()
+					continue
+				}
 				if m.probe(wc) {
 					accountLock.Lock()
 					current, exists := m.connections.Load(key)
@@ -1434,10 +1438,10 @@ func (m *Manager) lookupResponseConn(responseID string, accountID int64, apiKey 
 // 成功返回 (连接, pendingRequest, 池内 sessionKey)；绑定失效或连接忙时返回 nil，
 // 此单次尝试保留兼容入口；生产续链通过 acquireContinuation 有界等待。
 func (m *Manager) AcquirePreferredConnection(responseID string, accountID int64, apiKey string) (*WsConnection, *PendingRequest, string) {
-	return m.acquirePreferredConnection(websocketContinuation{responseID: responseID, accountID: accountID, apiKey: apiKey})
+	return m.acquirePreferredConnection(context.Background(), websocketContinuation{responseID: responseID, accountID: accountID, apiKey: apiKey})
 }
 
-func (m *Manager) acquirePreferredConnection(input websocketContinuation) (*WsConnection, *PendingRequest, string) {
+func (m *Manager) acquirePreferredConnection(ctx context.Context, input websocketContinuation) (*WsConnection, *PendingRequest, string) {
 	accountID := input.accountID
 	wc, sessionKey := m.lookupContinuationConn(input)
 	if wc == nil {
@@ -1478,7 +1482,7 @@ func (m *Manager) acquirePreferredConnection(input websocketContinuation) (*WsCo
 	}
 	wc.Touch()
 	if wc.account != nil {
-		m.trimIdleAccountConnections(accountID, accountConnectionLimit(wc.account), wc)
+		m.trimIdleAccountConnections(accountID, accountConnectionLimitForContext(ctx, wc.account), wc)
 	}
 	return wc, pr, sessionKey
 }

@@ -9,6 +9,7 @@ import (
 type accountLiveItem struct {
 	ActiveRequests   int64 `json:"active_requests"`
 	OccupiedRequests int64 `json:"occupied_requests"`
+	ReclaimableSlots int64 `json:"reclaimable_buffered_requests"`
 	// DynamicConcurrencyLimit is the admission cap the scheduler currently
 	// enforces (base concurrency after health-tier and quota guards).
 	DynamicConcurrencyLimit int64 `json:"dynamic_concurrency_limit"`
@@ -40,6 +41,7 @@ func (h *Handler) GetAccountLiveState(c *gin.Context) {
 		live[id] = accountLiveItem{
 			ActiveRequests:           account.GetActiveRequests(),
 			OccupiedRequests:         account.GetOccupiedRequests(),
+			ReclaimableSlots:         account.GetReclaimableSlots(),
 			DynamicConcurrencyLimit:  account.GetDynamicConcurrencyLimit(),
 			BaseConcurrencyEffective: account.GetBaseConcurrencyEffective(),
 		}

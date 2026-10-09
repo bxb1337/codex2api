@@ -246,6 +246,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	if sendErr != nil && gjson.GetBytes(wsBody, "previous_response_id").String() != "" {
 		wc.session.RemovePendingRequest(pr.RequestID)
 		e.manager.DiscardConnection(wc)
+		proxy.FinishInferenceRequest(ctx)
 		return nil, &proxy.ResponsesContinuationLostError{Reason: "original_connection_send_failed"}
 	}
 	for retries := 0; shouldRetryWebsocketSendError(sendErr) && retries < 2; retries++ {
@@ -265,6 +266,11 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		if wc.upstreamUserAgentKnown {
 			proxy.RecordUpstreamUserAgent(ctx, wc.upstreamUserAgent)
 		}
+		if _, err := proxy.BeginInferenceRequest(ctx); err != nil {
+			wc.cancelUnsentReadLease(pr.RequestID)
+			wc.session.RemovePendingRequest(pr.RequestID)
+			return nil, err
+		}
 		sendErr = e.sendRequest(wc, wsBody, pr.RequestID)
 	}
 	if sendErr != nil {
@@ -275,15 +281,18 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 
 	// 启动心跳
 	e.manager.StartHeartbeat(wc)
+	activeConnection := wc
+	proxy.CurrentInferenceRequest(ctx).OnSharedLoss(func() { e.manager.DiscardConnection(activeConnection) })
 
 	return &WsResponse{
-		conn:        wc,
-		pendingReq:  pr,
-		sessionID:   poolSessionID,
-		manager:     e.manager,
-		apiKey:      apiKey,
-		model:       gjson.GetBytes(wsBody, "model").String(),
-		readErrChan: make(chan error, 1),
+		conn:           wc,
+		pendingReq:     pr,
+		sessionID:      poolSessionID,
+		manager:        e.manager,
+		apiKey:         apiKey,
+		model:          gjson.GetBytes(wsBody, "model").String(),
+		readErrChan:    make(chan error, 1),
+		inferenceLease: proxy.CurrentInferenceRequest(ctx),
 	}, nil
 }
 
@@ -458,13 +467,14 @@ func (e *Executor) sendRequest(wc *WsConnection, body []byte, requestID string) 
 
 // WsResponse WebSocket 响应包装器
 type WsResponse struct {
-	model       string
-	conn        *WsConnection
-	pendingReq  *PendingRequest
-	sessionID   string
-	manager     *Manager
-	readErrChan chan error
-	closed      bool
+	inferenceLease *proxy.InferenceRequestLease
+	model          string
+	conn           *WsConnection
+	pendingReq     *PendingRequest
+	sessionID      string
+	manager        *Manager
+	readErrChan    chan error
+	closed         bool
 	// apiKey 发起本请求的下游 API Key，用于 response_id → 连接绑定的归属校验。
 	apiKey string
 	// connBroken 标记读流因上游 WS 异常(非正常关闭)或下游写入失败而终止；
@@ -532,6 +542,7 @@ func (r *WsResponse) handleMessage(payload []byte, callback func(data []byte) bo
 	// 上游错误帧：透传给下游(转成 SSE 错误事件)，而不是转成 Go error 后静默关闭 pipe。
 	// 否则下游只会读到一个底层 read error → 表现为空响应，无从得知具体错误。
 	if errEvent, isErr := r.buildErrorEvent(payload); isErr {
+		r.inferenceLease.Finish()
 		// 连接级寿命限制错误：针对连接而非单个请求，这条连接上的后续
 		// response.create 一律失败，而 Ping 探活仍会成功；归还池会持续毒害
 		// 后续请求（含续链亲和定向回来的），必须标记销毁 (issue #346)。
@@ -549,9 +560,12 @@ func (r *WsResponse) handleMessage(payload []byte, callback func(data []byte) bo
 	// 标准化完成事件类型
 	payload = normalizeCompletionEvent(payload)
 
-	// 终态先记录绑定与完成状态，再交给下游。
+	// 上游终态先释放推理槽，本地转发和记账不占位。
 	eventType := gjson.GetBytes(payload, "type").String()
 	terminal := isReadLeaseTerminal(payload)
+	if terminal {
+		r.inferenceLease.Finish()
+	}
 	if eventType == "response.completed" || eventType == "response.incomplete" {
 		r.bindCompletedResponse(gjson.GetBytes(payload, "response.id").String())
 	}
@@ -674,6 +688,7 @@ func (r *WsResponse) markStreamCompleted() {
 
 // Close 关闭响应并归还连接
 func (r *WsResponse) Close() error {
+	defer r.inferenceLease.Finish()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 

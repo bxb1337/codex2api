@@ -256,6 +256,7 @@ Redis 原生 WS 快照将完整历史、账号 ID、凭证代际、兼容域和�
 | 字段 | 类型 | 默认值 | 范围 | 说明 |
 |------|------|--------|------|------|
 | `MaxConcurrency` | int | 2 | ≥1（无上限） | 单账号最大并发请求数 |
+| `ConcurrencyAccountingMode` | string | `legacy` | `legacy` / `inference` | 管理 API 字段 `concurrency_accounting_mode`；目前仅影响 Codex Responses HTTP/WS、HTTP 降级与内部继续推理 |
 | `GlobalRPM` | int | 0 | 0-∞ | 全局每分钟请求限制，0 表示不限 |
 | `MaxRetries` | int | 2 | 0-10 | 原有有限重试预算，覆盖传输错误及既有可重试的 5xx（含 500/502/503/504）；`0` 禁用该预算 |
 | `MaxRateLimitRetries` | int | 1 | 0-10 | 原有有限的 429 独立重试预算；`0` 禁用该预算 |
@@ -288,7 +289,7 @@ Redis 原生 WS 快照将完整历史、账号 ID、凭证代际、兼容域和�
 
 Codex 瞬时账号限流按 `15s → 30s → 60s → 120s → 240s → 300s` 退避。同一冻结窗口的并发 429 只推进一次；较长的真实 `Retry-After` 可延长该窗口（上限 5 分钟），普通重复 429 不顺延截止时间。短时冻结同样阻止 Spark 调度，但普通模型的 5h/7d 配额耗尽仍不占用 Spark 独立配额。短冻结不写数据库、不主动触发 WHAM 探测，到期直接恢复本地索引。原生 Redis/Memory 缓存保留限流类型和退避级别，并原子合并截止时间；迟到的短冻结不能覆盖配额或鉴权冷却。滚动升级期间旧实例无法识别新分类，建议完成全部实例升级后再评估短冻结行为。
 
-运维 API 的 `scheduler` 指标新增 `fast_scanned_accounts`（实际候选检查数）、`fast_filter_checks`、`fast_acquire_failures`、`fast_lock_wait_ns` 和 `model_cooldown_cache_reads`。这些是本进程累计计数，宜取时间差计算每次选号成本；快路径命中不再代表没有扫描。`selection_duration_buckets` 为 `10us/100us/1ms/10ms/100ms/1s/+Inf` 累积直方图，覆盖与 `selection_total` 相同的普通/新会话选号，已有绑定的直接复用不计入该直方图。跨实例共享冷却与 outbox 不提供账号全局并发限制，并发名额仍由每个实例独立计数。
+运维 API 的 `scheduler` 指标新增 `fast_scanned_accounts`（实际候选检查数）、`fast_filter_checks`、`fast_acquire_failures`、`fast_lock_wait_ns` 和 `model_cooldown_cache_reads`。这些是本进程累计计数，宜取时间差计算每次选号成本；快路径命中不再代表没有扫描。`selection_duration_buckets` 为 `10us/100us/1ms/10ms/100ms/1s/+Inf` 累积直方图，覆盖与 `selection_total` 相同的普通/新会话选号，已有绑定的直接复用不计入该直方图。跨实例共享冷却与 outbox 本身不提供账号全局并发限制；`legacy` 名额仍按实例计数。Redis 下的 Codex Responses `inference` 模式另外使用共享推理租约，对账号、API Key 和 scope 执行跨实例并发准入。
 
 等待队列还暴露 `max_waiters`、`max_waiters_per_key`、`waiters`、`wait_rejected`（全部队列拒绝）、`wait_rejected_per_key`（其中因单 Key 上限被拒绝的子集）、`wait_granted`、`wait_duration_ns`，以及 `10ms/100ms/1s/10s/30s/+Inf` 的 `wait_duration_buckets` 累积直方图。等待耗时统计包含成功、取消和超时，拒绝入队不计入；`wait_wakeups / wait_granted` 的增量比可辅助观察无效唤醒，不能当作上游吞吐指标。Docker 部署应将两个新环境变量传给应用容器；项目标准/SQLite compose 的 `env_file` 会读取 `.env`，2004 专用 compose 可用 `environment` 覆盖。
 
@@ -372,8 +373,11 @@ Claude / Grok / Antigravity 等中继型账号不经 Resin，始终按第 2、3 
 
 ### WebSocket 连接池与 1009 降级
 
-- 每个账号的上游物理 WebSocket 连接数受其当前 `DynamicConcurrencyLimit` 限制。
-- 容量不足时先回收没有有效续链绑定的空闲连接，再回收其他空闲连接；在途连接不会因超限、空闲时长或到龄轮转被中断。Ping/Pong 不续期业务空闲时间。
+- “通用设置 → 流量保护 → 并发计算方式”默认使用旧行为（`legacy`）：统计整轮请求处理时间，保留缓冲硬占位，物理 WS 上限为账号的 `DynamicConcurrencyLimit`。
+- 推理并发（`inference`）在连接可用、实际发送前取得 API Key、账号及 scope 名额；上游终态、错误或取消时释放。排队、等待连接、客户端工具执行、重试退避、输出过滤和记账不占推理槽；下游离开后仍读取上游完成计费的请求，计数保留到上游终止。
+- Redis 下，推理模式用一次 Lua 操作申请账号、API Key 和 scope 的全部名额，申请失败不留下部分占位。账号容量满时最多按原调度等待窗口等待，并响应取消；Key/scope 满时返回 `429`。租约有效期 15 秒，每 5 秒续期，结束时按唯一 owner 释放；实例退出后名额自动过期。Redis 故障拒绝新的共享准入并返回 `503`；在途租约丢失或无法续期时停止对应上游，避免租约过期后仍继续占用推理。共享限制覆盖同一数据库、同一 Redis 下启用该模式的实例；旧模式及其他渠道仍按原策略工作，混用旧实例不能提供完整的全局限制。本地管理端在途指标与物理 WS 容量仍按实例展示。
+- 新模式保留会话槽缓冲开关与时长，缓冲只使用剩余容量，其他请求可按需回收。每个 HTTP 请求或 WS 轮次固定当前模式，内部请求继承；切换设置后，已有请求和缓冲按原策略完成。
+- 推理模式的账号物理 WS 上限为动态请求上限加 8。容量不足时先回收没有有效续链绑定的空闲连接，再回收其他空闲连接；在途连接不会因超限、空闲时长或到龄轮转被中断。Ping/Pong 不续期业务空闲时间。
 - 带 `previous_response_id` 的请求只取回原连接，并复验账号、模型、出口和客户端身份；忙时可取消地等待，遵守现有 busy 等待上限。等待耗尽返回 `status:503`，API Key 并发拒绝返回 `status:429`，均保留下游 WS 供下一轮使用。
 - 上游在尚未向下游输出内容时返回 close 1009，或本地读取触发等价的 read-limit 错误，网关会保留同一账号租约和已解析代理，最多降级一次 HTTP。
 - 1009 属于传输限制，不降低账号健康度，也不触发鉴权探针；一旦已向下游输出内容，就不会再发起 HTTP 降级，避免重复请求和重复计费。

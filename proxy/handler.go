@@ -3813,6 +3813,7 @@ func firstGJSONInt(body []byte, paths ...string) int64 {
 
 // Responses 处理 /v1/responses 请求（原生透传，增强输入验证）
 func (h *Handler) Responses(c *gin.Context) {
+	defer h.beginResponsesConcurrency(c)()
 	// 1. 读取请求体
 	handlerStart := time.Now()
 	rawBody, err := readRawRequestBody(c)
@@ -4058,12 +4059,13 @@ func (h *Handler) Responses(c *gin.Context) {
 		if !retainedHTTPFallback {
 			affinityGuard = auth.SessionAffinityGuard{}
 			if attempt == 0 && compactionAffinity.Known && !turnContinuationPinned {
-				account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+				account = h.preferredResponsesCandidate(c, auth.InferenceCandidateOptions{PreferredAccountID: compactionAffinity.PreferredAccountID, APIKeyID: apiKeyID, Exclude: retryExclusions.ForSelection(), Filter: accountFilter, Policy: dispatchPolicy})
 			}
 			if account != nil {
 				stickyProxyURL = account.GetProxyURL()
 			} else if continuationUnavailable && !relayContinuationAttempted {
-				account, stickyProxyURL, affinityGuard = h.nextAccountForSessionWithDispatchGuard(affinityKey, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+				candidate := h.nextResponsesCandidate(c, auth.InferenceCandidateOptions{SessionKey: affinityKey, APIKeyID: apiKeyID, Exclude: retryExclusions.ForSelection(), Filter: accountFilter, Policy: dispatchPolicy})
+				account, stickyProxyURL, affinityGuard = candidate.Account, candidate.ProxyURL, candidate.Guard
 			} else if turnContinuationPinned {
 				account, stickyProxyURL, selectionErr = h.nextRetryAccountForContinuationWithDispatch(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
 			} else {
@@ -4149,7 +4151,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
 		if !retainedHTTPFallback && !continuousRetryBuffersAttempts(continuousRetryPolicy) {
 			if !bindContinuousRetrySessionAffinityWithGuard(c.Request.Context(), h.store, affinityKey, account, proxyURL, affinityGuard) {
-				h.store.Release(account)
+				h.releaseResponsesAccount(c, account)
 				return
 			}
 		}
@@ -4254,9 +4256,17 @@ func (h *Handler) Responses(c *gin.Context) {
 			durationMs := int(time.Since(start).Milliseconds())
 
 			if reqErr != nil {
+				if busy, admission := inferenceAdmissionFailure(reqErr); admission {
+					h.releaseResponsesAccount(c, account)
+					if busy {
+						continue
+					}
+					ErrorToGinResponse(c, reqErr)
+					return
+				}
 				if apiKeyModelRequestError(reqErr) != nil {
 					stopTTFTGuard()
-					h.store.Release(account)
+					h.releaseResponsesAccount(c, account)
 					sendAPIKeyModelRequestQuotaError(c, reqErr)
 					return
 				}
@@ -4280,7 +4290,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				if retryable && shouldPenalizeTransportKind(kind) && !(timedOut && shouldRetry) && !stickyRetry {
 					h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 				}
-				h.store.Release(account)
+				h.releaseResponsesAccount(c, account)
 				if retryable && !stickyRetry {
 					h.store.UnbindSessionAffinity(affinityKey, account.ID())
 				}
@@ -4340,14 +4350,14 @@ func (h *Handler) Responses(c *gin.Context) {
 				rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 				resp.Body.Close()
 				if continuousRetryCommitExpired(c, continuousRetryProtocolResponses) {
-					h.store.Release(account)
+					h.releaseResponsesAccount(c, account)
 					return
 				}
 				antigravityRefreshFailed := false
 				if resp.StatusCode == http.StatusUnauthorized && account.IsAntigravityAPI() && account.AntigravityAuthKind() == auth.AntigravityAuthKindOAuth && !antigravityRefreshRetried[account.ID()] {
 					antigravityRefreshRetried[account.ID()] = true
 					if refreshErr := h.store.RefreshAntigravityAccount(c.Request.Context(), account); refreshErr == nil {
-						h.store.Release(account)
+						h.releaseResponsesAccount(c, account)
 						h.store.UnbindSessionAffinity(affinityKey, account.ID())
 						log.Printf("Antigravity OAuth token refreshed after upstream 401 (account=%d)", account.ID())
 						continue
@@ -4371,7 +4381,7 @@ func (h *Handler) Responses(c *gin.Context) {
 							expandedInputRaw = responsesInputRaw(codexBody)
 						}
 						log.Printf("OpenAI Responses 上游拒绝 encrypted_content，已移除加密 reasoning 上下文并重试一次 (attempt %d)", attempt+1)
-						h.store.Release(account)
+						h.releaseResponsesAccount(c, account)
 						h.store.UnbindSessionAffinity(affinityKey, account.ID())
 						continue
 					}
@@ -4380,7 +4390,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				if kind := classifyHTTPFailure(resp.StatusCode); kind != "" && !antigravityRefreshFailed && !antigravityNonPenalizingUpstreamFailure(account, resp.StatusCode, errBody) {
 					h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 				}
-				h.store.Release(account)
+				h.releaseResponsesAccount(c, account)
 				h.store.UnbindSessionAffinity(affinityKey, account.ID())
 				retryExclusions.MarkHTTPFailure(account.ID(), resp.StatusCode, errBody, maxRetries, attemptMaxRateLimitRetries, continuousRetryPolicy)
 
@@ -4450,13 +4460,13 @@ func (h *Handler) Responses(c *gin.Context) {
 			}) {
 			case grokQualityGuardRetry:
 				stopTTFTGuard()
-				h.store.Release(account)
+				h.releaseResponsesAccount(c, account)
 				h.store.UnbindSessionAffinity(affinityKey, account.ID())
 				retryExclusions.MarkHard(account.ID())
 				continue
 			case grokQualityGuardFailClosed:
 				stopTTFTGuard()
-				h.store.Release(account)
+				h.releaseResponsesAccount(c, account)
 				h.sendGrokNativeHTTPError(c, GrokProtocolResponses, grokQualityDegradedOutcome())
 				return
 			}
@@ -4480,7 +4490,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					rememberContinuousRetryStreamFailure(c.Request.Context(), outcome, outcome.failurePayload)
 					_ = streamAttempt.Close()
 					h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
-					h.store.Release(account)
+					h.releaseResponsesAccount(c, account)
 					h.store.UnbindSessionAffinity(affinityKey, account.ID())
 					retryExclusions.MarkStreamFailure(account.ID(), outcome, maxRetries, attemptMaxRateLimitRetries, continuousRetryPolicy)
 					retryOrdinal, retryLimit := retryStateForStreamOutcome(outcome, generalRetries, rateLimitRetries, maxRetries, attemptMaxRateLimitRetries, continuousRetryPolicy)
@@ -4492,7 +4502,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				if outcome.logStatusCode == http.StatusOK {
 					if !claimContinuousRetrySuccess(c, continuousRetryProtocolResponses) {
 						_ = streamAttempt.Close()
-						h.store.Release(account)
+						h.releaseResponsesAccount(c, account)
 						return
 					}
 					copyGrokNativeResponseHeaders(c, resp.Header)
@@ -4544,9 +4554,9 @@ func (h *Handler) Responses(c *gin.Context) {
 					h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)
 				}
 				if outcome.logStatusCode == http.StatusOK {
-					h.store.ReleaseForSessionWithGuard(account, affinityKey, affinityGuard)
+					h.releaseResponsesSession(c, account, auth.InferenceSessionBuffer{SessionKey: affinityKey, Guard: affinityGuard})
 				} else {
-					h.store.Release(account)
+					h.releaseResponsesAccount(c, account)
 				}
 				return
 			}
@@ -4601,14 +4611,14 @@ func (h *Handler) Responses(c *gin.Context) {
 					ttftGuard.Stop()
 					if !claimContinuousRetryTerminal(c, continuousRetryProtocolResponses) {
 						resp.Body.Close()
-						h.store.Release(account)
+						h.releaseResponsesAccount(c, account)
 						return
 					}
 					c.JSON(http.StatusInternalServerError, gin.H{
 						"error": gin.H{"message": "streaming not supported", "type": "server_error"},
 					})
 					resp.Body.Close()
-					h.store.Release(account)
+					h.releaseResponsesAccount(c, account)
 					return
 				}
 				streamAttempt = h.newContinuousRetryStreamAttempt(continuousRetryBuffersAttempts(continuousRetryPolicy), c.Writer, flusher)
@@ -4626,6 +4636,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					}
 					parsed := gjson.ParseBytes(data)
 					eventType := normalizedUpstreamSSEEventType(sseEvent, data)
+					observeInferenceTerminal(c.Request.Context(), eventType)
 					ttftGuard.MarkProgress(eventType)
 					isFirstToken := isLooseFirstTokenResult(parsed)
 					if !ttftRecorded && isFirstToken {
@@ -4816,7 +4827,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
 				}
 				resp.Body.Close()
-				h.store.Release(account)
+				h.releaseResponsesAccount(c, account)
 				h.unbindOrRetainAffinityForCapacityShedWithGuard(retryExclusions, affinityKey, account, proxyURL, affinityGuard, outcome, capacityShedRetries, continuousRetryPolicy)
 				if !isFirstTokenTimeoutOutcome(outcome) && !outcome.capacityShed &&
 					retryLimitForStreamOutcome(outcome, maxRetries, attemptMaxRateLimitRetries, continuousRetryPolicy) == -1 {
@@ -4833,7 +4844,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				if !claimContinuousRetrySuccess(c, continuousRetryProtocolResponses) {
 					_ = streamAttempt.Close()
 					resp.Body.Close()
-					h.store.Release(account)
+					h.releaseResponsesAccount(c, account)
 					return
 				}
 				copyGrokNativeResponseHeaders(c, resp.Header)
@@ -4964,9 +4975,9 @@ func (h *Handler) Responses(c *gin.Context) {
 				h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)
 			}
 			if outcome.logStatusCode == http.StatusOK {
-				h.store.ReleaseForSessionWithGuard(account, affinityKey, affinityGuard)
+				h.releaseResponsesSession(c, account, auth.InferenceSessionBuffer{SessionKey: affinityKey, Guard: affinityGuard})
 			} else {
-				h.store.Release(account)
+				h.releaseResponsesAccount(c, account)
 			}
 			return
 		}
@@ -5005,9 +5016,17 @@ func (h *Handler) Responses(c *gin.Context) {
 		durationMs := int(time.Since(start).Milliseconds())
 
 		if reqErr != nil {
+			if busy, admission := inferenceAdmissionFailure(reqErr); admission {
+				h.releaseResponsesAccount(c, account)
+				if busy {
+					continue
+				}
+				ErrorToGinResponse(c, reqErr)
+				return
+			}
 			if apiKeyModelRequestError(reqErr) != nil {
 				ttftGuard.Stop()
-				h.store.Release(account)
+				h.releaseResponsesAccount(c, account)
 				sendAPIKeyModelRequestQuotaError(c, reqErr)
 				return
 			}
@@ -5038,7 +5057,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			if retryable && shouldPenalizeTransportKind(kind) && !(timedOut && shouldRetry) && !stickyRetry {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
-			h.store.Release(account)
+			h.releaseResponsesAccount(c, account)
 			if retryable && !stickyRetry {
 				h.store.UnbindSessionAffinity(affinityKey, account.ID())
 			}
@@ -5096,7 +5115,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 			resp.Body.Close()
 			if continuousRetryCommitExpired(c, continuousRetryProtocolResponses) {
-				h.store.Release(account)
+				h.releaseResponsesAccount(c, account)
 				return
 			}
 			accountReleasedForOverflow := false
@@ -5115,7 +5134,7 @@ func (h *Handler) Responses(c *gin.Context) {
 						expandedInputRaw = responsesInputRaw(codexBody)
 					}
 					log.Printf("上游拒绝 encrypted_content，已移除加密 reasoning 上下文并重试一次 (attempt %d)", attempt+1)
-					h.store.Release(account)
+					h.releaseResponsesAccount(c, account)
 					h.store.UnbindSessionAffinity(affinityKey, account.ID())
 					continue
 				}
@@ -5127,7 +5146,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				// 摘要请求需要沿用同一 Key 的路由/预算，但不能与父请求同时占住
 				// 当前账号或 scope 并发位，否则单账号池会发生自锁。
 				h.ReleaseAPIKeyScopeConcurrency(c)
-				h.store.Release(account)
+				h.releaseResponsesAccount(c, account)
 				accountReleasedForOverflow = true
 				if compacted, ok := h.compactOverflowResponsesBodyForRequest(c, codexBody); ok {
 					overflowCompactRetried = true
@@ -5143,7 +5162,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			}
 			SyncCodexUsageState(h.store, account, resp)
 			if !accountReleasedForOverflow {
-				h.store.Release(account)
+				h.releaseResponsesAccount(c, account)
 			}
 			h.store.UnbindSessionAffinity(affinityKey, account.ID())
 			retryExclusions.MarkHTTPFailure(account.ID(), resp.StatusCode, errBody, maxRetries, attemptMaxRateLimitRetries, continuousRetryPolicy)
@@ -5253,14 +5272,14 @@ func (h *Handler) Responses(c *gin.Context) {
 				ttftGuard.Stop()
 				if !claimContinuousRetryTerminal(c, continuousRetryProtocolResponses) {
 					resp.Body.Close()
-					h.store.Release(account)
+					h.releaseResponsesAccount(c, account)
 					return
 				}
 				c.JSON(http.StatusInternalServerError, gin.H{
 					"error": gin.H{"message": "streaming not supported", "type": "server_error"},
 				})
 				resp.Body.Close()
-				h.store.Release(account)
+				h.releaseResponsesAccount(c, account)
 				return
 			}
 			streamAttempt = h.newContinuousRetryStreamAttempt(continuousRetryBuffersAttempts(continuousRetryPolicy), c.Writer, flusher)
@@ -5300,6 +5319,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 				parsed := gjson.ParseBytes(data)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
+				observeInferenceTerminal(c.Request.Context(), eventType)
 
 				// TTFT: 记录第一个实际内容事件的时间
 				ttftGuard.MarkProgress(eventType)
@@ -5550,6 +5570,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 				parsed := gjson.ParseBytes(data)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
+				observeInferenceTerminal(c.Request.Context(), eventType)
 				if eventType == "error" {
 					terminalFailurePayload = terminalUpstreamErrorPayload(data)
 					gotTerminal = true
@@ -5680,7 +5701,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
 			}
 			resp.Body.Close()
-			h.store.Release(account)
+			h.releaseResponsesAccount(c, account)
 			h.unbindOrRetainAffinityForCapacityShedWithGuard(retryExclusions, affinityKey, account, proxyURL, affinityGuard, outcome, capacityShedRetries, continuousRetryPolicy)
 			if !isFirstTokenTimeoutOutcome(outcome) && !outcome.capacityShed &&
 				retryLimitForStreamOutcome(outcome, maxRetries, attemptMaxRateLimitRetries, continuousRetryPolicy) == -1 {
@@ -5697,7 +5718,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			if !claimContinuousRetrySuccess(c, continuousRetryProtocolResponses) {
 				_ = streamAttempt.Close()
 				resp.Body.Close()
-				h.store.Release(account)
+				h.releaseResponsesAccount(c, account)
 				return
 			}
 			if commitErr := h.commitResponsesStreamAttempt(c, streamAttempt, affinityKey, account, attemptEffectiveModel, resp.Header); commitErr != nil {
@@ -5747,7 +5768,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			isContextLengthExceededFailedPayload(terminalFailurePayload) {
 			resp.Body.Close()
 			h.ReleaseAPIKeyScopeConcurrency(c)
-			h.store.Release(account)
+			h.releaseResponsesAccount(c, account)
 			accountReleasedForOverflow = true
 			if compacted, ok := h.compactOverflowResponsesBodyForRequest(c, codexBody); ok {
 				overflowCompactRetried = true
@@ -5863,9 +5884,9 @@ func (h *Handler) Responses(c *gin.Context) {
 		}
 		if !accountReleasedForOverflow {
 			if outcome.logStatusCode == http.StatusOK {
-				h.store.ReleaseForSessionWithGuard(account, affinityKey, affinityGuard)
+				h.releaseResponsesSession(c, account, auth.InferenceSessionBuffer{SessionKey: affinityKey, Guard: affinityGuard})
 			} else {
-				h.store.Release(account)
+				h.releaseResponsesAccount(c, account)
 			}
 		}
 		return
@@ -5874,6 +5895,7 @@ func (h *Handler) Responses(c *gin.Context) {
 
 // ResponsesCompact 处理 /v1/responses/compact 请求（非流式压缩接口，透传到上游 /responses/compact）
 func (h *Handler) ResponsesCompact(c *gin.Context) {
+	defer h.beginResponsesConcurrency(c)()
 	// 1. 读取请求体
 	rawBody, err := readRawRequestBody(c)
 	if err != nil {
@@ -6030,13 +6052,14 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		var affinityGuard auth.SessionAffinityGuard
 		var selectionErr error
 		if attempt == 0 && compactionAffinity.Known {
-			account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+			account = h.preferredResponsesCandidate(c, auth.InferenceCandidateOptions{PreferredAccountID: compactionAffinity.PreferredAccountID, APIKeyID: apiKeyID, Exclude: retryExclusions.ForSelection(), Filter: accountFilter, Policy: dispatchPolicy})
 			if account != nil {
 				stickyProxyURL = account.GetProxyURL()
 			}
 		}
 		if account == nil {
-			account, stickyProxyURL, affinityGuard = h.nextAccountForSessionWithDispatchGuard(affinityKey, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+			candidate := h.nextResponsesCandidate(c, auth.InferenceCandidateOptions{SessionKey: affinityKey, APIKeyID: apiKeyID, Exclude: retryExclusions.ForSelection(), Filter: accountFilter, Policy: dispatchPolicy})
+			account, stickyProxyURL, affinityGuard = candidate.Account, candidate.ProxyURL, candidate.Guard
 		}
 		if account == nil {
 			if continuousRetryCommitExpired(c, continuousRetryProtocolResponses) {
@@ -6097,7 +6120,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		start := time.Now()
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
 		if !bindContinuousRetrySessionAffinityWithGuard(c.Request.Context(), h.store, affinityKey, account, proxyURL, affinityGuard) {
-			h.store.Release(account)
+			h.releaseResponsesAccount(c, account)
 			return
 		}
 		attemptEffectiveModel := effectiveModel
@@ -6127,8 +6150,16 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			durationMs := int(time.Since(start).Milliseconds())
 
 			if reqErr != nil {
+				if busy, admission := inferenceAdmissionFailure(reqErr); admission {
+					h.releaseResponsesAccount(c, account)
+					if busy {
+						continue
+					}
+					ErrorToGinResponse(c, reqErr)
+					return
+				}
 				if apiKeyModelRequestError(reqErr) != nil {
-					h.store.Release(account)
+					h.releaseResponsesAccount(c, account)
 					sendAPIKeyModelRequestQuotaError(c, reqErr)
 					return
 				}
@@ -6136,7 +6167,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				if kind := classifyTransportFailure(reqErr); retryable && shouldPenalizeTransportKind(kind) {
 					h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 				}
-				h.store.Release(account)
+				h.releaseResponsesAccount(c, account)
 				if retryable {
 					h.store.UnbindSessionAffinity(affinityKey, account.ID())
 					retryExclusions.MarkRequestFailure(account.ID(), reqErr, maxRetries)
@@ -6164,7 +6195,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 				resp.Body.Close()
 				if continuousRetryCommitExpired(c, continuousRetryProtocolResponses) {
-					h.store.Release(account)
+					h.releaseResponsesAccount(c, account)
 					return
 				}
 
@@ -6181,7 +6212,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 							codexBody = strippedCodexBody
 						}
 						log.Printf("OpenAI Responses compact 上游拒绝 encrypted_content，已移除加密 reasoning 上下文并重试一次 (attempt %d)", attempt+1)
-						h.store.Release(account)
+						h.releaseResponsesAccount(c, account)
 						h.store.UnbindSessionAffinity(affinityKey, account.ID())
 						continue
 					}
@@ -6190,7 +6221,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				if kind := classifyHTTPFailure(resp.StatusCode); kind != "" {
 					h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 				}
-				h.store.Release(account)
+				h.releaseResponsesAccount(c, account)
 				h.store.UnbindSessionAffinity(affinityKey, account.ID())
 				effectiveRateLimitRetries := h.effectiveMaxRateLimitRetries(account, maxRateLimitRetries)
 				retryExclusions.MarkHTTPFailure(account.ID(), resp.StatusCode, errBody, maxRetries, effectiveRateLimitRetries)
@@ -6250,7 +6281,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				if retryable && shouldPenalizeTransportKind(kind) {
 					h.store.ReportRequestFailure(account, kind, time.Duration(totalDuration)*time.Millisecond)
 				}
-				h.store.Release(account)
+				h.releaseResponsesAccount(c, account)
 				if retryable {
 					h.store.UnbindSessionAffinity(affinityKey, account.ID())
 					retryExclusions.MarkRequestFailure(account.ID(), readErr, maxRetries)
@@ -6296,7 +6327,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				return
 			}
 			if !claimContinuousRetrySuccess(c, continuousRetryProtocolResponses) {
-				h.store.Release(account)
+				h.releaseResponsesAccount(c, account)
 				return
 			}
 			h.store.ClearModelCooldown(account, attemptEffectiveModel)
@@ -6344,7 +6375,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			applyUpstreamResponseModelObservation(compactRelayLogInput, compactRelayObserver, upstreamSentModelForAudit(attemptEffectiveModel, logModel), account.ID())
 			h.logUsageForRequest(c, compactRelayLogInput)
 
-			h.store.ReleaseForSessionWithGuard(account, affinityKey, affinityGuard)
+			h.releaseResponsesSession(c, account, auth.InferenceSessionBuffer{SessionKey: affinityKey, Guard: affinityGuard})
 			contentType := resp.Header.Get("Content-Type")
 			if contentType == "" {
 				contentType = "application/json"
@@ -6378,8 +6409,16 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		durationMs := int(time.Since(start).Milliseconds())
 
 		if reqErr != nil {
+			if busy, admission := inferenceAdmissionFailure(reqErr); admission {
+				h.releaseResponsesAccount(c, account)
+				if busy {
+					continue
+				}
+				ErrorToGinResponse(c, reqErr)
+				return
+			}
 			if apiKeyModelRequestError(reqErr) != nil {
-				h.store.Release(account)
+				h.releaseResponsesAccount(c, account)
 				sendAPIKeyModelRequestQuotaError(c, reqErr)
 				return
 			}
@@ -6387,7 +6426,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			if kind := classifyTransportFailure(reqErr); retryable && shouldPenalizeTransportKind(kind) {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
-			h.store.Release(account)
+			h.releaseResponsesAccount(c, account)
 			if retryable {
 				h.store.UnbindSessionAffinity(affinityKey, account.ID())
 				retryExclusions.MarkRequestFailure(account.ID(), reqErr, maxRetries)
@@ -6415,7 +6454,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 			resp.Body.Close()
 			if continuousRetryCommitExpired(c, continuousRetryProtocolResponses) {
-				h.store.Release(account)
+				h.releaseResponsesAccount(c, account)
 				return
 			}
 
@@ -6432,7 +6471,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 						codexBody = strippedCodexBody
 					}
 					log.Printf("compact 上游拒绝 encrypted_content，已移除加密 reasoning 上下文并重试一次 (attempt %d)", attempt+1)
-					h.store.Release(account)
+					h.releaseResponsesAccount(c, account)
 					h.store.UnbindSessionAffinity(affinityKey, account.ID())
 					continue
 				}
@@ -6442,7 +6481,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
 			SyncCodexUsageState(h.store, account, resp)
-			h.store.Release(account)
+			h.releaseResponsesAccount(c, account)
 			h.store.UnbindSessionAffinity(affinityKey, account.ID())
 			effectiveRateLimitRetries := h.effectiveMaxRateLimitRetries(account, maxRateLimitRetries)
 			retryExclusions.MarkHTTPFailure(account.ID(), resp.StatusCode, errBody, maxRetries, effectiveRateLimitRetries)
@@ -6511,7 +6550,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				h.store.ReportRequestFailure(account, kind, time.Duration(totalDuration)*time.Millisecond)
 			}
 			SyncCodexUsageState(h.store, account, resp)
-			h.store.Release(account)
+			h.releaseResponsesAccount(c, account)
 			if retryable {
 				h.store.UnbindSessionAffinity(affinityKey, account.ID())
 				retryExclusions.MarkRequestFailure(account.ID(), readErr, maxRetries)
@@ -6577,7 +6616,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 						codexBody = strippedCodexBody
 					}
 					log.Printf("compact(body-signal) 上游拒绝 encrypted_content，已移除加密 reasoning 上下文并重试一次 (attempt %d)", attempt+1)
-					h.store.Release(account)
+					h.releaseResponsesAccount(c, account)
 					h.store.UnbindSessionAffinity(affinityKey, account.ID())
 					continue
 				}
@@ -6588,7 +6627,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				decision = h.applyResponseFailedCooldown(account, compactFailedPayload, resp, effectiveModel)
 			}) {
 				resp.Body.Close()
-				h.store.Release(account)
+				h.releaseResponsesAccount(c, account)
 				return
 			}
 			failureOutcome = applyResponseFailedDecisionKind(failureOutcome, compactFailedPayload, decision)
@@ -6625,7 +6664,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 					rememberContinuousRetryFailure(c.Request.Context(), continuousRetryFailure{status: failStatus, body: errBody, contentType: "application/json"})
 				}
 			}
-			h.store.Release(account)
+			h.releaseResponsesAccount(c, account)
 			h.store.UnbindSessionAffinity(affinityKey, account.ID())
 			if selectedContinuousFailure {
 				retryExclusions.MarkStreamFailureForEvent(account.ID(), failureOutcome, eventType, maxRetries, effectiveRateLimitRetries, continuousPolicy)
@@ -6680,7 +6719,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		}
 
 		if !claimContinuousRetrySuccess(c, continuousRetryProtocolResponses) {
-			h.store.Release(account)
+			h.releaseResponsesAccount(c, account)
 			return
 		}
 		SyncCodexUsageState(h.store, account, resp)
@@ -6725,7 +6764,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		h.logUsageForRequest(c, compactLogInput)
 
 		h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)
-		h.store.ReleaseForSessionWithGuard(account, affinityKey, affinityGuard)
+		h.releaseResponsesSession(c, account, auth.InferenceSessionBuffer{SessionKey: affinityKey, Guard: affinityGuard})
 		c.Data(http.StatusOK, "application/json", respBody)
 		h.recordCompactionProvenanceFromPayload(context.Background(), account, respBody)
 		return
