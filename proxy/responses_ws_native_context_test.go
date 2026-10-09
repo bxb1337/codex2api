@@ -205,7 +205,7 @@ func TestNativeWSMissingContextKeepsDownstreamUsable(t *testing.T) {
 	assertNativeWSSuccess(t, nativeWSTurn(t, conn, `{"input":[{"role":"user","content":"full history"}]}`))
 }
 
-func TestNativeWSCacheIsMemoryOnlyAndRejectsIncompleteSnapshots(t *testing.T) {
+func TestNativeWSCacheRejectsIncompleteSnapshotsAndIsolatesLegacyNamespace(t *testing.T) {
 	resetResponseCacheForTest()
 	t.Cleanup(resetResponseCacheForTest)
 	backend := newRecordingResponseContextBackend(true)
@@ -223,7 +223,7 @@ func TestNativeWSCacheIsMemoryOnlyAndRejectsIncompleteSnapshots(t *testing.T) {
 	_, _, _ = degradeResponsesWSContinuationWithSource(missing, owner, newResponsesWSReplaySource(missing, owner))
 	drainResponseCacheBackendWrites()
 	if sets, gets := backend.counts(); sets != 0 || gets != 0 {
-		t.Fatalf("native context accessed backend: writes=%d reads=%d", sets, gets)
+		t.Fatalf("native context accessed legacy namespace: writes=%d reads=%d", sets, gets)
 	}
 	config := defaultResponseCacheConfig()
 	config.maxItems = 1

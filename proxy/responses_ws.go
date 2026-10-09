@@ -448,7 +448,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	_, turnHasBinding := h.store.SessionAffinityAccountID(affinityKey)
 	respCacheOwner := responseCacheOwner(apiKeyID)
 	if gjson.GetBytes(rawBody, "store").Type == gjson.False {
-		respCacheOwner = nativeWSTurnCacheOwner(c, respCacheOwner, nativeWSTurnScope{body: rawBody, identity: sessionIdentity})
+		respCacheOwner = nativeWSTurnCacheOwner(c, respCacheOwner, nativeWSTurnScope{body: rawBody, identity: sessionIdentity, databaseScope: h.db.RuntimeCacheScope()})
 	}
 	markResponsesWSContinuationCapable(respCacheOwner, rawBody)
 	ruleIdentity := h.payloadRuleIdentity(c)
@@ -461,8 +461,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	}
 
 	codexBody, naturalImageIntent := prepareResponsesWebSocketTurnBody(rawBody)
-	// Pin an available L1 ancestor before upstream generation; defer backend
-	// lookup, merging and serialization until a snapshot is actually needed.
+	// 生成前固定祖先；原生 WS 必要时读共享快照，历史合并与序列化保持按需执行。
 	// strip 策略：剥离图片工具能力声明后作为普通文本请求继续（issue #411）。
 	codexBody = applyImageGenerationStripPolicy(c, codexBody)
 	if err := validateResponsesImageGenerationSizes(codexBody); err != nil {
@@ -585,9 +584,10 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	continuationPinned := turnContinuation && turnHasBinding
 	continuationDegraded := false
 	if err := waitNativeWSCommit(c.Request.Context(), respCacheOwner, gjson.GetBytes(codexBody, "previous_response_id").String()); err != nil {
-		return writeResponsesWSError(conn, nativeResponsesWSContextError(responsesWSContextUnavailable(http.StatusConflict, "context_commit_pending")))
+		return writeResponsesWSError(conn, nativeResponsesWSContextError(responsesWSContextUnavailable(http.StatusServiceUnavailable, "context_commit_pending")))
 	}
 	turnReplay := newResponsesWSReplaySource(codexBody, respCacheOwner)
+	accountFilter = nativeWSReplayAccountFilter(accountFilter, turnReplay)
 	degradeContinuation := func(reason string, attempt int) *api.APIError {
 		expanded, lost, contextErr := degradeResponsesWSContinuationWithSource(codexBody, respCacheOwner, turnReplay)
 		if contextErr != nil {

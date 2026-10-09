@@ -19,7 +19,7 @@ import (
 // must not turn a partial input into a supposedly complete cached conversation.
 func responsesWSReplayInput(body []byte, owner string) (string, *api.APIError) {
 	if strings.HasPrefix(owner, nativeWSCachePrefix) {
-		return responsesWSReplayInputWithLookup(body, owner, nativeWSLocalLookup)
+		return responsesWSReplayInputWithLookup(body, owner, nativeWSContextLookup)
 	}
 	return responsesWSReplayInputWithLookup(body, owner, getResponseCacheForReplay)
 }
@@ -276,7 +276,7 @@ func responsesWSContextReason(apiErr *api.APIError) string {
 }
 
 // markResponsesWSContinuationCapable 为允许持久存储的会话授予 on_demand 写入资格。
-// store:false 的原生 WS 续链单独使用有界内存快照。
+// store:false 的原生 WS 续链单独使用完整快照，并复用共享后端。
 func markResponsesWSContinuationCapable(owner string, rawBody []byte) {
 	if store := gjson.GetBytes(rawBody, "store"); store.Exists() && store.Type == gjson.False {
 		return
@@ -284,9 +284,8 @@ func markResponsesWSContinuationCapable(owner string, rawBody []byte) {
 	markResponseCacheChainOwnerIfOnDemand(owner)
 }
 
-// responsesWSReplaySource pins a live L1 ancestor at turn admission. Its immutable
-// bodies survive expiry/eviction during generation; merging and backend fallback
-// remain lazy and do not count as client replay hits or misses.
+// 入场时固定不可变祖先；原生 WS 缺少 L1 时读取共享快照以保留加密上下文的账号。
+// 旧续链后端查询、历史合并与序列化仍按需执行，不提前记为客户端回放命中。
 type responsesWSReplaySource struct {
 	body               []byte
 	owner              string
@@ -307,6 +306,10 @@ func newResponsesWSReplaySource(body []byte, owner string) *responsesWSReplaySou
 			source.previous = &responseCacheLookupResult{Kind: responseCacheLookupHit, Source: responseCacheSourceLocal, Items: append([]json.RawMessage(nil), entry.items...), nativeProvenance: entry.nativeProvenance}
 		}
 		respCache.mu.RUnlock()
+		if source.previous == nil && strings.HasPrefix(owner, nativeWSCachePrefix) {
+			lookup := nativeWSContextLookup(owner, previousID)
+			source.previous = &lookup
+		}
 	}
 	return source
 }
@@ -326,7 +329,7 @@ func (s *responsesWSReplaySource) Input() string {
 	s.once.Do(func() {
 		if strings.HasPrefix(s.owner, nativeWSCachePrefix) && s.previous == nil {
 			if id := gjson.GetBytes(s.body, "previous_response_id").String(); id != "" {
-				lookup := nativeWSLocalLookup(s.owner, id)
+				lookup := nativeWSContextLookup(s.owner, id)
 				s.previous = &lookup
 			}
 		}
@@ -338,6 +341,8 @@ func (s *responsesWSReplaySource) Input() string {
 			lookup := nativeWSLocalLookup(owner, id)
 			if !strings.HasPrefix(owner, nativeWSCachePrefix) {
 				lookup = lookupResponseCacheResultWithOwnership(owner, id, true)
+			} else {
+				lookup = nativeWSContextLookup(owner, id)
 			}
 			s.previous = &lookup
 			return lookup

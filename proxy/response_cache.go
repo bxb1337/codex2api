@@ -404,10 +404,10 @@ func admitResponseCacheWithTicket(storeKey string, items []json.RawMessage) ([]j
 		entryBytes > respCache.config.maxBytes
 	if respCache.config.maxEntries <= 0 || overL1ByteBudget {
 		respCache.stats.OversizeSkips++
-		if (respCache.runtimeCache == nil || native) && overL1ByteBudget {
+		if respCache.runtimeCache == nil && overL1ByteBudget {
 			respCache.stats.OversizeRejections++
 		}
-		if respCache.runtimeCache == nil || native {
+		if respCache.runtimeCache == nil {
 			respCache.setMarkerLocked(storeKey, responseCacheLookupKnownOversize, time.Now().Add(respCache.config.ttl))
 		} else {
 			respCache.setWriteMarkerLocked(storeKey, responseCacheLookupBackendPending, time.Now().Add(respCache.config.ttl), serial)
@@ -421,10 +421,10 @@ func admitResponseCacheWithTicket(storeKey string, items []json.RawMessage) ([]j
 		if oldest == nil {
 			overL1ByteBudget = respCache.stats.Bytes+entryBytes > respCache.config.maxBytes
 			respCache.stats.OversizeSkips++
-			if (respCache.runtimeCache == nil || native) && overL1ByteBudget {
+			if respCache.runtimeCache == nil && overL1ByteBudget {
 				respCache.stats.OversizeRejections++
 			}
-			if respCache.runtimeCache == nil || native {
+			if respCache.runtimeCache == nil {
 				respCache.setMarkerLocked(storeKey, responseCacheLookupKnownOversize, time.Now().Add(respCache.config.ttl))
 			} else {
 				respCache.setWriteMarkerLocked(storeKey, responseCacheLookupBackendPending, time.Now().Add(respCache.config.ttl), serial)

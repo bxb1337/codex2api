@@ -34,14 +34,15 @@ func nativeWSCacheOwner(owner string, identity requestSessionIdentity) string {
 }
 
 type nativeWSTurnScope struct {
-	body     []byte
-	identity requestSessionIdentity
+	body          []byte
+	identity      requestSessionIdentity
+	databaseScope string
 }
 
 func nativeWSTurnCacheOwner(c *gin.Context, owner string, scope nativeWSTurnScope) string {
 	keyIdentity := deterministicPromptCacheKey(strings.TrimPrefix(strings.TrimSpace(downstreamAuthorizationHeader(c.Request)), "Bearer "), nil)
 	parts := []string{nativeWSCacheOwner(owner, scope.identity), responsesWSSessionPreemptScopeHash(c, scope.identity),
-		responsesWSTransportLane(c, scope.body, scope.identity), gjson.GetBytes(scope.body, "stream_id").String(), keyIdentity}
+		responsesWSTransportLane(c, scope.body, scope.identity), gjson.GetBytes(scope.body, "stream_id").String(), keyIdentity, scope.databaseScope}
 	hash := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return nativeWSCachePrefix + hex.EncodeToString(hash[:])
 }
@@ -61,22 +62,25 @@ func nativeWSLocalLookup(owner, responseID string) responseCacheLookupResult {
 	return responseCacheLookupResult{Kind: responseCacheLookupMiss}
 }
 
-// 终态暴露前建立屏障，跨下游重连须等本地提交完成再读取快照。
+// 终态暴露前建立屏障，跨下游重连须等提交完成再读取快照。
 func beginNativeWSCommit(owner, responseID string) func() {
 	if !strings.HasPrefix(owner, nativeWSCachePrefix) || responseID == "" {
 		return func() {}
 	}
 	key := responseCacheStoreKey(owner, responseID)
 	nativeWSCommits.Lock()
-	defer nativeWSCommits.Unlock()
 	if nativeWSCommits.pending[key] != nil || len(nativeWSCommits.pending) >= nativeWSCommitMaxEntries {
+		nativeWSCommits.Unlock()
 		return func() {}
 	}
 	done := make(chan struct{})
 	nativeWSCommits.pending[key] = done
+	nativeWSCommits.Unlock()
+	finishShared := beginNativeWSSharedCommit(key)
 	var once sync.Once
 	return func() {
 		once.Do(func() {
+			finishShared()
 			nativeWSCommits.Lock()
 			delete(nativeWSCommits.pending, key)
 			close(done)
@@ -90,13 +94,13 @@ func waitNativeWSCommit(ctx context.Context, owner, responseID string) error {
 	done := nativeWSCommits.pending[responseCacheStoreKey(owner, responseID)]
 	nativeWSCommits.Unlock()
 	if done == nil {
-		return nil
+		return waitNativeWSSharedCommit(ctx, owner, responseID)
 	}
 	timer := time.NewTimer(nativeWSCommitWait)
 	defer timer.Stop()
 	select {
 	case <-done:
-		return nil
+		return waitNativeWSSharedCommit(ctx, owner, responseID)
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-timer.C:
@@ -168,14 +172,19 @@ func cacheNativeWSContext(snapshot nativeWSCompletedContext) {
 	// 保留不透明输出，恢复时核对账号兼容性；不能丢掉必要推理后声称上下文完整。
 	items = mergeResponsesWSContext(items, outputs)
 	key := responseCacheStoreKey(owner, responseID)
-	_, admitted, _, serial := admitResponseCacheWithTicket(key, items)
-	if admitted {
-		respCache.mu.Lock()
-		if entry := respCache.store[key]; entry != nil && entry.serial == serial {
-			entry.nativeProvenance = snapshot.provenance
-		}
-		respCache.mu.Unlock()
+	items, admitted, _, serial := admitResponseCacheWithTicket(key, items)
+	respCache.mu.RLock()
+	expiresAt := time.Now().Add(respCache.config.ttl)
+	respCache.mu.RUnlock()
+	setNativeWSLocalMetadata(key, nativeWSLocalMetadata{serial: serial, provenance: snapshot.provenance, expiresAt: expiresAt})
+	record := nativeWSSharedContext{Version: nativeWSContextVersion, Items: items, ExpiresAt: expiresAt}
+	if snapshot.provenance != nil {
+		record.AccountID, record.Generation, record.Domain = snapshot.provenance.accountID, snapshot.provenance.generation, snapshot.provenance.domain
 	}
+	if !admitted && items == nil || len(record.Domain) > nativeWSDomainMaxBytes {
+		record.Items, record.Domain, record.Unavailable = nil, "", "oversize"
+	}
+	persistNativeWSContext(nativeWSSharedWrite{key: key, response: responseID, serial: serial, record: record})
 }
 
 func cacheCommittedResponsesWSContext(snapshot nativeWSCompletedContext) {
