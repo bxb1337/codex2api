@@ -20,6 +20,7 @@ const (
 	nativeWSMetadataBytes    = int64(4096)
 	nativeWSDomainMaxBytes   = 1024
 	nativeWSPendingMaxBytes  = int64(64)
+	nativeWSCommitPoll       = 100 * time.Millisecond
 )
 
 type nativeWSSharedContext struct {
@@ -233,7 +234,7 @@ func waitNativeWSSharedCommit(ctx context.Context, owner, responseID string) err
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, nativeWSCommitWait)
 	defer cancel()
-	ticker := time.NewTicker(inferenceSharedLeasePoll)
+	ticker := time.NewTicker(nativeWSCommitPoll)
 	defer ticker.Stop()
 	for {
 		readCtx, readCancel := context.WithTimeout(waitCtx, responseCacheBackendSyncTimeout)

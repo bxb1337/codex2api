@@ -6,7 +6,6 @@
 export type AccountConcurrencyInput = {
   active_requests?: number
   occupied_requests?: number
-  reclaimable_buffered_requests?: number
   session_slot_buffer_enabled?: boolean
   dynamic_concurrency_limit?: number
   base_concurrency_effective?: number
@@ -20,7 +19,6 @@ export type AccountConcurrencyDisplay = {
   showOccupied: boolean
   // 分子：与准入判断同口径的已用槽位。
   used: number
-  reclaimable: number
   // 实际并发上限；未知或 <= 0 时为 null，此时只展示分子。
   limit: number | null
   // 配置并发；未知或 <= 0 时为 null。
@@ -45,7 +43,6 @@ export function resolveAccountConcurrencyDisplay(
   const occupied = Math.max(active, account.occupied_requests ?? active)
   if (occupied === 0) return null
 
-  const reclaimable = Math.min(occupied - active, Math.max(0, account.reclaimable_buffered_requests ?? 0))
   const showOccupied = account.session_slot_buffer_enabled === true
   const limit = positiveInteger(account.dynamic_concurrency_limit)
   const base = positiveInteger(account.base_concurrency_effective)
@@ -54,8 +51,7 @@ export function resolveAccountConcurrencyDisplay(
     occupied,
     buffered: occupied - active,
     showOccupied,
-    used: showOccupied ? occupied - reclaimable : active,
-    reclaimable,
+    used: showOccupied ? occupied : active,
     limit,
     base,
     degraded: limit !== null && base !== null && limit < base,

@@ -162,18 +162,8 @@ func noteUpstreamTurnState(ctx context.Context, state string) {
 }
 
 func doTracedUpstreamRequest(client *http.Client, req *http.Request, account *auth.Account, proxyURL string) (*http.Response, error) {
-	lease, err := BeginInferenceRequest(req.Context())
-	if err != nil {
-		return nil, err
-	}
-	req = req.WithContext(lease.upstreamContext(req.Context()))
 	record := beginUpstreamTrace(req.Context(), account, proxyURL, false)
 	resp, err := client.Do(req)
-	if err != nil {
-		lease.Finish()
-	} else {
-		trackInferenceResponse(resp, lease)
-	}
 	record(resp)
 	return resp, err
 }

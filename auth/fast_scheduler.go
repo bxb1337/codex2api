@@ -607,7 +607,7 @@ func (s *FastScheduler) scanRangeLocked(expectedTier AccountHealthTier, rangeSta
 			if proven != entry.proven || math.Abs(score-entry.dispatchScore) >= 1 {
 				s.refreshEntryLocked(expectedTier, idx, score, proven)
 			}
-			occupied := accountAdmissionLoad(entry.acc)
+			occupied := accountOccupiedRequests(entry.acc)
 			if !available || limit <= 0 || occupied >= limit {
 				continue
 			}
@@ -682,7 +682,7 @@ func (s *FastScheduler) acquireCandidatesOutsideLock(candidates []fastSchedulerC
 		}
 		// A slow filter can outlive a cooldown/disable/concurrency change.
 		tier, _, limit, _, available := acc.fastSchedulerSnapshotForPolicy(baseLimit, time.Now(), policy)
-		if !available || limit <= 0 || accountDispatchBlocked(acc) || accountAdmissionLoad(acc) >= limit {
+		if !available || limit <= 0 || accountDispatchBlocked(acc) || accountOccupiedRequests(acc) >= limit {
 			continue
 		}
 		if tier != expectedTier {

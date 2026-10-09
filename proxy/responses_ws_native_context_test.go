@@ -29,22 +29,14 @@ func newNativeWSFixture(t *testing.T, execute func(context.Context, []byte) (*ht
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	resetResponseCacheForTest()
-	oldSettings, oldExecutor := CurrentRuntimeSettings(), WebsocketExecuteFunc
+	oldExecutor := WebsocketExecuteFunc
 	t.Cleanup(func() {
-		ApplyRuntimeSettings(oldSettings)
 		WebsocketExecuteFunc = oldExecutor
 		resetResponseCacheForTest()
 	})
-	UpdateRuntimeSettings(func(settings RuntimeSettings) RuntimeSettings {
-		settings.ConcurrencyAccountingMode = database.ConcurrencyAccountingInference
-		return settings
-	})
 	WebsocketExecuteFunc = func(ctx context.Context, account *auth.Account, body []byte, _, _, _ string, _ *DeviceProfileConfig, _ http.Header, _ string) (*http.Response, error) {
-		if _, err := BeginInferenceRequest(ctx); err != nil {
-			return nil, err
-		}
 		if int64(1) != account.GetActiveRequests() {
-			t.Error("upstream inference did not occupy capacity")
+			t.Error("upstream request did not occupy account capacity")
 		}
 		return execute(ctx, body)
 	}
@@ -116,8 +108,8 @@ func TestNativeWSStoreFalseRecoversToolChainAfterReconnect(t *testing.T) {
 			conn.Close()
 			conn = fixture.connect(t)
 			assertNativeWSSuccess(t, nativeWSTurn(t, conn, `{"previous_response_id":"two","input":[{"type":"function_call_output","call_id":"b","output":"2"}]}`))
-			if int32(4) != calls.Load() || int64(0) != fixture.account.GetActiveRequests() {
-				t.Fatal("recovery repeated or retained inference slot")
+			if int32(4) != calls.Load() {
+				t.Fatal("recovery repeated")
 			}
 		})
 	}

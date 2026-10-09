@@ -18,20 +18,6 @@ test("idle accounts keep the concurrency badge hidden", () => {
   assert.equal(resolveAccountConcurrencyDisplay({}), null);
 });
 
-test("reclaimable inference buffers do not consume displayed capacity", () => {
-  const display = resolveAccountConcurrencyDisplay({
-    active_requests: 0,
-    occupied_requests: 1,
-    reclaimable_buffered_requests: 1,
-    session_slot_buffer_enabled: true,
-    dynamic_concurrency_limit: 1,
-  });
-  assert.ok(display);
-  assert.equal(0, display.used);
-  assert.equal(1, display.reclaimable);
-  assert.equal("0 / 1", formatAccountConcurrencyText(display));
-});
-
 test("active requests are shown against the effective limit", () => {
   const display = resolveAccountConcurrencyDisplay({
     active_requests: 5,

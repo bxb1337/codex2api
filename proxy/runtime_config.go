@@ -66,11 +66,10 @@ const (
 )
 
 type RuntimeSettings struct {
-	ConcurrencyAccountingMode string
-	ClientCompatMode          string
-	CodexMinCLIVersion        string
-	CodexUserAgentConfig      string
-	CodexTelemetryEnabled     bool
+	ClientCompatMode      string
+	CodexMinCLIVersion    string
+	CodexUserAgentConfig  string
+	CodexTelemetryEnabled bool
 	// CodexTelemetryTimingDebug 打开模拟遥测的临时计时探针（仅打日志，默认关闭）。
 	CodexTelemetryTimingDebug bool
 	// CodexUnifiedClientIdentityEnabled 让网关自发的 Codex 维护请求（用量探针、重置券、
@@ -183,7 +182,6 @@ func init() {
 
 func DefaultRuntimeSettings() RuntimeSettings {
 	return RuntimeSettings{
-		ConcurrencyAccountingMode:        database.ConcurrencyAccountingLegacy,
 		ClientCompatMode:                 defaultClientCompatMode,
 		CodexMinCLIVersion:               defaultCodexMinCLIVersion,
 		CodexUserAgentConfig:             DefaultCodexUserAgentConfigJSON(),
@@ -276,7 +274,6 @@ func NormalizeBillingTierPolicy(policy string) string {
 
 func NormalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 	defaults := DefaultRuntimeSettings()
-	settings.ConcurrencyAccountingMode = database.NormalizeConcurrencyAccountingMode(settings.ConcurrencyAccountingMode)
 	settings.ClientCompatMode = NormalizeClientCompatMode(settings.ClientCompatMode)
 	settings.StreamFlushPolicy = NormalizeStreamFlushPolicy(settings.StreamFlushPolicy)
 	settings.FirstTokenMode = NormalizeFirstTokenMode(settings.FirstTokenMode)
@@ -351,7 +348,6 @@ func ApplyRuntimeSettingsFromSystem(settings *database.SystemSettings) RuntimeSe
 
 	next := DefaultRuntimeSettings()
 	if settings != nil {
-		next.ConcurrencyAccountingMode = settings.ConcurrencyAccountingMode
 		next.ClientCompatMode = settings.ClientCompatMode
 		next.CodexMinCLIVersion = settings.CodexMinCLIVersion
 		next.CodexUserAgentConfig = settings.CodexUserAgentConfig

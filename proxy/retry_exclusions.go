@@ -482,13 +482,6 @@ func (h *Handler) waitForRetryAccountAvailableWithGuard(ctx context.Context, aff
 			return step, nil
 		}
 	}
-	if responsesInferenceFromContext(ctx) != nil {
-		candidate, err := h.waitInferenceCandidate(ctx, auth.InferenceCandidateOptions{
-			SessionKey: affinityKey, APIKeyID: apiKeyID, Exclude: exclude, Filter: filter,
-			PreserveBinding: preserveBinding, Policy: policy, Heartbeat: heartbeat,
-		})
-		return candidate.Account, candidate.ProxyURL, candidate.Guard, err
-	}
 	account, proxyURL, guard, err := h.store.WaitForDispatchAvailable(ctx, affinityKey, dispatchAccountWaitTimeout, apiKeyID, exclude, filter, preserveBinding, policy, heartbeat)
 	account, proxyURL = guardRetryAccountContext(ctx, h.store.Release, account, proxyURL)
 	if account == nil {
@@ -551,7 +544,6 @@ func (h *Handler) nextRetryAccountWithGuard(ctx context.Context, affinityKey str
 	}
 	ctx, cancelSelection := context.WithTimeout(ctx, accountSelectionTimeout)
 	defer cancelSelection()
-	durableFilter := filter
 	filter = selectionFilterWithContext(ctx, filter)
 	for {
 		if ctx.Err() != nil {
@@ -561,20 +553,14 @@ func (h *Handler) nextRetryAccountWithGuard(ctx context.Context, affinityKey str
 		var account *auth.Account
 		var stickyProxyURL string
 		var guard auth.SessionAffinityGuard
-		if responsesInferenceFromContext(ctx) != nil {
-			candidate := h.selectInferenceCandidate(ctx, auth.InferenceCandidateOptions{
-				SessionKey: affinityKey, APIKeyID: apiKeyID, Exclude: exclude, Filter: durableFilter,
-				PreserveBinding: preserveBinding, Policy: policy,
-			})
-			account, stickyProxyURL, guard = candidate.Account, candidate.ProxyURL, candidate.Guard
-		} else if preserveBinding {
+		if preserveBinding {
 			account, stickyProxyURL = h.store.NextForContinuationWithDispatch(affinityKey, apiKeyID, exclude, filter, policy)
 		} else {
 			account, stickyProxyURL, guard = h.nextAccountForSessionWithDispatchGuard(affinityKey, apiKeyID, exclude, filter, policy)
 		}
 		if account != nil {
 			if ctx.Err() != nil {
-				releaseSelectedAccount(ctx, h.store, account)
+				h.store.Release(account)
 				return nil, "", auth.SessionAffinityGuard{}, ctx.Err()
 			}
 			return account, stickyProxyURL, guard, nil
@@ -592,14 +578,10 @@ func (h *Handler) nextRetryAccountWithGuard(ctx context.Context, affinityKey str
 		// retry interval/backoff still paces the next upstream attempt.
 		if !h.onlyResettableExclusionsBlock(affinityKey, apiKeyID, exclusions, exclude, filter, preserveBinding, policy) {
 			var admissionErr error
-			waitFilter := filter
-			if responsesInferenceFromContext(ctx) != nil {
-				waitFilter = durableFilter
-			}
-			account, stickyProxyURL, guard, admissionErr = h.waitForRetryAccountAvailableWithGuard(ctx, affinityKey, apiKeyID, exclude, waitFilter, preserveBinding, policy)
+			account, stickyProxyURL, guard, admissionErr = h.waitForRetryAccountAvailableWithGuard(ctx, affinityKey, apiKeyID, exclude, filter, preserveBinding, policy)
 			if account != nil {
 				if ctx.Err() != nil {
-					releaseSelectedAccount(ctx, h.store, account)
+					h.store.Release(account)
 					return nil, "", auth.SessionAffinityGuard{}, ctx.Err()
 				}
 				return account, stickyProxyURL, guard, nil
