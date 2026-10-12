@@ -222,7 +222,7 @@ Messages 的 `tool_use.input` 必须使用对象，因此自由文本工具输�
 | include              | array        | 否   | 包含的额外字段                                                                                     |
 | previous_response_id | string       | 否   | 上一响应 ID，用于上下文连续                                                                        |
 
-`previous_response_id` 的上下文先查当前进程的有界 L1。本地与 Redis 共享上下文的默认绝对 TTL 为 45 分钟，覆盖聊天上游连接 30 分钟空闲回收后的恢复窗口，仍受缓存容量和账号兼容性限制。已认证请求按 API Key ID 隔离；未配置任何 API Key、显式启用 `CODEX_ALLOW_ANONYMOUS=true` 后放行的请求共用 `anon` 命名空间。Redis 模式在 L1 未命中时可从共享后端重建；后端值未超过重建上限但超过 L1 准入预算时仍可服务本次请求，只是不提升到 L1。Memory 模式没有共享 response context 后备，依赖上下文被判定为超限、已淘汰或缺失时可能返回 HTTP `409 response_context_unavailable`。共享后端暂时不可用且请求依赖该上下文时可能返回 HTTP `503 service_unavailable`。如果账号池存在可用的 relay-style 后备，网关可保留原始 `previous_response_id` 继续转发，而不是立即返回上述错误。客户端原生 Responses WebSocket 入口在上游连接正常时保留 `previous_response_id` 并只发送当轮增量，轮次开始时保留仍有效的 L1 祖先引用，快照合并与序列化在响应成功提交后才执行并写入本地缓存，共享后端（Redis）写入在后台完成，不占首字路径。缓存会收集 `response.output_item.done`，因此最终 `response.output` 为空时也能保留消息、`phase`、工具调用/结果及 Lite `additional_tools` 声明。`response.completed` 和 `response.incomplete` 成功提交后均可写入，仍受写入策略、TTL 和容量限制约束；按需写入模式下，`store` 未显式为 `false` 的 WebSocket 会话从根轮起即有写入资格；显式 `store:false` 的会话（如 Codex CLI 全量上下文）不写缓存，其历史无法事后恢复。续链失效、换号或转为 HTTP 时，只有能够恢复所需上下文才继续发送；缺失、超限或不可移植的加密状态返回 `response_context_unavailable` 错误帧，共享后端故障返回 `service_unavailable`，随后关闭连接（409 使用 1008，后端暂时不可用使用 1011）。客户端应重发完整上下文并开始新的响应链。
+`previous_response_id` 的上下文先查当前进程的有界 L1。本地与 Redis 共享上下文的默认绝对 TTL 为 45 分钟，覆盖聊天上游连接 30 分钟空闲回收后的恢复窗口，仍受缓存容量和账号兼容性限制。已认证请求按 API Key ID 隔离；未配置任何 API Key、显式启用 `CODEX_ALLOW_ANONYMOUS=true` 后放行的请求共用 `anon` 命名空间。Redis 模式在 L1 未命中时可从共享后端重建；后端值未超过重建上限但超过 L1 准入预算时仍可服务本次请求，只是不提升到 L1。Memory 模式没有共享 response context 后备，依赖上下文被判定为超限、已淘汰或缺失时可能返回 HTTP `409 response_context_unavailable`。共享后端暂时不可用且请求依赖该上下文时可能返回 HTTP `503 service_unavailable`。如果账号池存在可用的 relay-style 后备，网关可保留原始 `previous_response_id` 继续转发，而不是立即返回上述错误。客户端原生 Responses WebSocket 入口在上游连接正常时保留 `previous_response_id` 并只发送当轮增量，轮次开始时保留仍有效的 L1 祖先引用，快照合并与序列化在响应成功提交后才执行并写入本地缓存，共享后端（Redis）写入在后台完成，不占首字路径。缓存会收集 `response.output_item.done`，因此最终 `response.output` 为空时也能保留消息、`phase`、工具调用/结果及 Lite `additional_tools` 声明。`response.completed` 和 `response.incomplete` 成功提交后均可写入，仍受写入策略、TTL 和容量限制约束；按需写入模式下，`store` 未显式为 `false` 的 WebSocket 会话从根轮起即有写入资格；显式 `store:false` 的原生 WS 会话使用独立的有界续链快照，恢复加密状态时仍要求账号兼容；其他传输的写入遵循各自缓存策略。续链失效、换号或转为 HTTP 时，只有能够恢复所需上下文才继续发送；缺失、超限或不可移植的加密状态返回 `response_context_unavailable` 错误帧，共享后端故障返回 `service_unavailable`，命名流返回错误后保持连接，其他流继续；未命名的旧版非交互客户端保留错误关闭策略（409 使用 1008，后端暂时不可用使用 1011）。客户端应重发完整上下文并开始新的响应链。
 祖先在轮次开始前已过期或被淘汰时，网关不会把增量伪装成完整快照；该链后续健康轮也不能自行补全历史。缓存 TTL 为 45 分钟，Memory 模式重启会丢失缓存。设置环境变量 `CODEX_WS_CONTINUATION_FAIL_OPEN=true` 可退回旧行为：上下文不可恢复时剥离 `previous_response_id` 后按原样转发，上游将看不到历史；这次有损降级产生的响应不写回放缓存，关闭逃生阀后也不会信任残缺快照。
 
 对于原生 WebSocket 的结构化输出，`gpt-6-astra` 和 `gpt-5.6-luna` 在显式启用 Responses Lite 时保留 JSON Schema 的 `minLength` / `maxLength`。Lite 信号可来自 `client_metadata.ws_request_header_x_openai_internal_codex_responses_lite=true`、`X-OpenAI-Internal-Codex-Responses-Lite: true` 请求头，或由 Payload Rules 注入该元数据标记。该放行仅用于结构化输出；已有工具参数清洗继续使用保守规则。长度约束在入口准备阶段暂时保留，最终出站前才根据最终模型、规则改写后的 Lite 信号、账号 Lite 能力和实际传输统一处理。其他模型、最终未启用 Lite、HTTP 和 Compact 请求沿用原有清洗策略，HTTP 降级请求不会携带不适用的约束。
@@ -237,9 +237,25 @@ Codex 在生成过程中追加消息时，可在同一连接发送 `response.int
 {"type":"response.interrupt","response_id":"resp_...","mode":"discard_partial_items"}
 ```
 
-该控制帧独立于 `response.create` 队列处理，不要求 `model`，不新增模型请求计数。最终出站启用 Responses Lite 时，网关立即转发到当前轮次持有的上游 WebSocket，继续交付上游的中断确认、输出项中断事件及 `response.incomplete` 终态；普通 Responses、模型映射或账号能力门禁剥离 Lite 的请求，以及 HTTP 上游回退，沿用 Codex 的读取到终态再续接流程。OpenAI Responses 中转账号按最终模型与出站 Lite 信号选择同样的流程。客户端收到终态后可使用 `previous_response_id` 续接。`incomplete_details.reason` 为 `interrupted` 或 `steered` 的零输出响应保留原始终态和 usage，不改写为失败或触发透明重试。
+该控制帧独立于 `response.create` 队列处理，不要求 `model`，不新增模型请求计数。最终出站启用 Responses Lite 时，网关立即转发到当前轮次持有的上游 WebSocket，继续交付上游的中断确认、输出项中断事件及 `response.incomplete` 终态；普通 Responses、模型映射或账号能力门禁剥离 Lite 的请求，以及 HTTP 上游回退，沿用 Codex 的读取到终态再续接流程。OpenAI Responses 中转账号按最终模型与出站 Lite 信号选择同样的流程，WS 的 Lite 信号写入每个 create 帧，连接复用也不会沿用旧握手信号。模型门禁关闭 Lite 时，`additional_tools` 转回顶层工具声明，并移除仅适用于 Lite 的 `reasoning.context=all_turns`。客户端收到终态后可使用 `previous_response_id` 续接。`incomplete_details.reason` 为 `interrupted`、`steered`、`content_filter` 或 `max_messages` 的零输出响应保留原始终态和 usage，不改写为失败或触发透明重试。
 
-中断只能作用于本连接当前响应；重复中断和最近 64 个已结束响应的迟到中断会被忽略，避免干扰下一轮。无效响应 ID、未知字段或不支持的 mode 返回错误帧并保持连接，提供 `event_id` 时错误帧会携带它。此处实现的是 Codex 的 interrupt 流程；公开 Responses API 的 `response.steer` 自动续接事件仍需上游及网关另行支持。
+中断只能作用于本连接对应流的当前响应；重复中断和最近 64 个已结束响应的迟到中断会被忽略，避免干扰下一轮。无效响应 ID、未知字段或不支持的 mode 返回错误帧并保持连接，提供 `event_id` 时错误帧会携带它。
+
+命名流在 create 帧中指定 `stream_id`，例如 `{"type":"response.create","stream_id":"planner","model":"gpt-6-astra","input":"制定计划"}`。不同流可并行，同一流内的 create 按收到的顺序执行；每条连接最多同时执行 16 个响应，最多接受 32 个不同的命名流，省略字段时使用默认流。`stream_id` 长度为 1–256，只允许 ASCII 字母、数字、下划线、连字符和句点。命名流的响应和请求错误都携带其 `stream_id`，某个流的请求失败不会关闭其他流。API Key、scope 和账号并发限制仍按每个实际请求执行。连接级鉴权失效、断连或输入过载会取消整条连接的请求；未命名的旧版非交互客户端保留原来的错误关闭策略。
+
+命名流、GPT-6 和 Lite 能力轮次及时下发 `response.created`，使客户端能取得当前响应 ID。此类交互轮次不使用连续重试的整轮私有缓冲；公开生命周期后不会静默换号重放。响应尚未开始时，HTTP/传输层故障仍按配置重试。普通非交互轮次继续使用原有重试缓冲。
+
+GPT-6 生成过程中可发送公开协议的 `response.steer`：
+
+```json
+{"type":"response.steer","previous_response_id":"resp_...","input":"把范围缩小到两周内可以完成"}
+```
+
+steer 仅接受 `type`、`previous_response_id`、`input`，目标响应决定所属流，不发送 `stream_id`。input 可以是非空文本，也可以是非空的 user 消息数组；消息仅接受 type/role/content，内容支持 `input_text`、`input_image`、`input_file`。网关返回 `response.steer.accepted` 和提交 ID，在父响应安全结束后自动用新输入续接，并继承原请求的设置；父响应可正常 completed，不撤销已经发送的输出或工具工作。客户端继续读取后继响应，不必额外发送 create。
+
+父响应需要客户端工具结果或审批时，网关在其 completed 后发送 `response.steer.pending`，其中 `required_input` 标识所需的 function/custom/computer/shell/apply-patch/tool-search 结果或 MCP 审批。客户端在同一流发送带原 `previous_response_id` 的 create 并提交这些结果，已接受的 steering 输入会按顺序自动前置，显式 create 保留自己的设置。每个提交最多通知一次 pending。后继 `response.created` 是输入提交成功的确认；确认前的失败返回 `response.steer.failed`、原输入和原提交 ID。无效输入、模型不支持或过多的待处理输入也返回 failed，拒绝前尚未分配 ID 的事件不带 ID。待处理 steering 仅存在于当前连接中，断连后客户端应根据已经收到的事件判断是否需要重发。
+
+`generate:false` 预热不会消耗模型生成次数，也不记为生成成功或生成用量。需要回退到 HTTP 时，网关返回本地预热终态并保留可恢复的输入快照，不发送真实模型生成；后续请求可用该 ID 续接，恢复仍受上下文缓存和账号兼容性限制。实际 HTTP 出站删除 `type`、`generate`、`stream_id`，下游命名流的事件关联由网关补齐。create 的 generate 必须是布尔值，顶层重复字段会被拒绝，避免校验和实际生成采用不同的参数解释。
 
 **响应示例:**
 
