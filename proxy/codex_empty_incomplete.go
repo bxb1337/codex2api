@@ -65,6 +65,11 @@ func isEmptyIncompleteResponse(response gjson.Result) bool {
 	if !response.Exists() || !response.IsObject() {
 		return false
 	}
+	// 用户主动中断和 steering 可合法地产生零输出，必须保留终态与续链上下文。
+	switch response.Get("incomplete_details.reason").String() {
+	case "interrupted", "steered":
+		return false
+	}
 	if output := response.Get("output"); output.IsArray() && len(output.Array()) > 0 {
 		return false
 	}
