@@ -3,7 +3,6 @@ package api
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"regexp"
@@ -11,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 	"github.com/tidwall/gjson"
 )
 
@@ -60,8 +60,12 @@ func NewValidator(body []byte) *Validator {
 // 可选键（temperature/top_p/stop/... 通常不存在），逐条 GetBytes 会退化成
 // O(rules × body)。大请求体（曾 16MB）上这会造成秒级开销（issue #417）。
 func (v *Validator) ValidateRequest(rules map[string][]ValidationRule) *ValidationResult {
+	return v.validateRequest(gjson.ParseBytes(v.Body), rules)
+}
+
+func (v *Validator) validateRequest(body gjson.Result, rules map[string][]ValidationRule) *ValidationResult {
 	topLevel := make(map[string]gjson.Result)
-	gjson.ParseBytes(v.Body).ForEach(func(key, value gjson.Result) bool {
+	body.ForEach(func(key, value gjson.Result) bool {
 		topLevel[key.String()] = value
 		return true
 	})
@@ -484,7 +488,7 @@ func ValidateChatCompletionsRequest(body []byte, supportedModels []string) *Vali
 	rules := ChatCompletionValidationRules()
 	rules["model"] = append(rules["model"], ModelValidator(supportedModels))
 	validator := NewValidator(body)
-	return validator.ValidateRequest(rules)
+	return validator.ValidateRequestReadOnly(rules)
 }
 
 // ValidateResponsesAPIRequest validates a responses API request with model validation
@@ -492,7 +496,7 @@ func ValidateResponsesAPIRequest(body []byte, supportedModels []string) *Validat
 	rules := ResponsesAPIValidationRulesForModel(gjson.GetBytes(body, "model").String())
 	rules["model"] = append(rules["model"], ModelValidator(supportedModels))
 	validator := NewValidator(body)
-	return validator.ValidateRequest(rules)
+	return validator.ValidateRequestReadOnly(rules)
 }
 
 // ============ Gin Middleware ============

@@ -400,6 +400,7 @@ func main() {
 	if err := configureTrustedProxies(r, cfg.TrustedProxies); err != nil {
 		log.Fatalf("配置可信代理失败: %v", err)
 	}
+	r.Use(api.RequestReleaseMiddleware())
 	r.Use(api.RecoveryMiddleware())
 	r.Use(api.RequestContextMiddleware())
 	r.Use(api.VersionMiddleware())
