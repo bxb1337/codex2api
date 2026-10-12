@@ -285,55 +285,9 @@ func (h *Handler) ResponsesWebSocket(c *gin.Context) {
 		controls.drain()
 	}()
 
-	for {
-		var message responsesWSInboundMessage
-		var ok bool
-		select {
-		case message, ok = <-messages:
-		case <-requestCtx.Done():
-			return
-		}
-		if !ok {
-			return
-		}
-		message.releaseQueueBudget()
-		if message.err != nil {
-			if websocket.IsCloseError(message.err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived) {
-				return
-			}
-			if message.turn == 0 {
-				log.Printf("Responses WebSocket first message read failed: %v", message.err)
-			}
-			return
-		}
-		if requestCtx.Err() != nil {
-			return
-		}
-
-		if message.messageType != websocket.TextMessage && message.messageType != websocket.BinaryMessage {
-			apiErr := api.NewAPIError(api.ErrCodeInvalidRequest, "unsupported websocket message type", api.ErrorTypeInvalidRequest)
-			_ = writeResponsesWSError(conn, apiErr)
-			closeResponsesWS(conn, websocket.CloseUnsupportedData, apiErr.Message)
-			return
-		}
-
-		payload, forwardedEventID := stripNewAPIPolicyWebSocketEventID(message.payload)
-		if forwardedEventID == "" {
-			forwardedEventID = fmt.Sprintf("responses:%d", message.turn)
-		}
-		if err := h.forwardResponsesWebSocketTurn(c, conn, payload, forwardedEventID, nil); err != nil {
-			if errors.Is(err, errResponsesWSClientGone) {
-				return
-			}
-			var closeErr *responsesWSCloseError
-			if errors.As(err, &closeErr) {
-				closeResponsesWS(conn, closeErr.code, closeErr.reason)
-				return
-			}
-			closeResponsesWS(conn, websocket.CloseInternalServerErr, "upstream websocket proxy failed")
-			return
-		}
-	}
+	mux := newResponsesWSMultiplexer(h, c, conn)
+	defer mux.close()
+	mux.serve(messages)
 }
 
 func newAPIPolicyWebSocketUpgradeHeaders() http.Header {
@@ -359,12 +313,12 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	reservation, admitted := security.TryAcquireRequestMemory(int64(len(rawPayload)))
 	if !admitted {
 		apiErr := api.NewAPIError(api.ErrCodeServiceUnavailable, "Request memory capacity exhausted, please retry later", api.ErrorTypeServer)
-		_ = writeResponsesWSErrorWithin(conn, apiErr, responsesWSOverloadWriteTimeout)
+		_ = writeResponsesWSTurnErrorWithin(c, conn, responsesWSTurnError{apiErr, responsesWSOverloadWriteTimeout})
 		return newResponsesWSCloseError(websocket.CloseTryAgainLater, apiErr.Message, apiErr)
 	}
 	defer reservation.Release()
 	if apiErr := h.refreshNewAPIWebSocketBinding(c, time.Now()); apiErr != nil {
-		_ = writeResponsesWSError(conn, apiErr)
+		_ = writeResponsesWSTurnError(c, conn, apiErr)
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, apiErr)
 	}
 	// Each response.create is a separate logical request. Keep the verified
@@ -375,13 +329,13 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	resetUpstreamRequestTrace(c)
 	quotaParentRequest := c.Request
 	if err := h.refreshAPIKeyModelRequestQuotaTurn(c); err != nil {
-		return writeResponsesWSError(conn, apiKeyModelRequestError(err).apiErr)
+		return writeResponsesWSTurnError(c, conn, apiKeyModelRequestError(err).apiErr)
 	}
 	defer func() { c.Request = quotaParentRequest }()
 	c.Set(promptGuardPolicyEventIDContextKey, policyEventID)
 	rawBody, model, apiErr := normalizeResponsesWebSocketClientPayload(rawPayload)
 	if apiErr != nil {
-		_ = writeResponsesWSError(conn, apiErr)
+		_ = writeResponsesWSTurnError(c, conn, apiErr)
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, apiErr)
 	}
 	finishControls := beginResponsesWSControlTurn(c)
@@ -411,18 +365,18 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	rules["model"] = append(rules["model"], api.ModelValidator(supportedModels))
 	if result := validator.ValidateRequest(rules); !result.Valid {
 		apiErr = validator.ToAPIError()
-		_ = writeResponsesWSError(conn, apiErr)
+		_ = writeResponsesWSTurnError(c, conn, apiErr)
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, apiErr)
 	}
 
 	if len(rawBody) > security.MaxRequestBodySize {
 		apiErr = api.NewAPIError(api.ErrCodeInvalidRequest, "请求体过大", api.ErrorTypeInvalidRequest)
-		_ = writeResponsesWSError(conn, apiErr)
+		_ = writeResponsesWSTurnError(c, conn, apiErr)
 		return newResponsesWSCloseError(websocket.CloseMessageTooBig, apiErr.Message, apiErr)
 	}
 	if err := security.ValidateModelName(model); err != nil {
 		apiErr = api.NewAPIError(api.ErrCodeInvalidParameter, "model 参数无效", api.ErrorTypeInvalidRequest)
-		_ = writeResponsesWSError(conn, apiErr)
+		_ = writeResponsesWSTurnError(c, conn, apiErr)
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, err)
 	}
 	auditEndpoint := "/v1/responses"
@@ -445,7 +399,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	rawBody = normalizeServiceTierField(rawBody)
 	if err := ValidateResponsesFunctionNames(rawBody); err != nil {
 		apiErr = api.NewAPIError(api.ErrCodeInvalidParameter, err.Error(), api.ErrorTypeInvalidRequest)
-		_ = writeResponsesWSError(conn, apiErr)
+		_ = writeResponsesWSTurnError(c, conn, apiErr)
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, err)
 	}
 
@@ -475,7 +429,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	codexBody = applyImageGenerationStripPolicy(c, codexBody)
 	if err := validateResponsesImageGenerationSizes(codexBody); err != nil {
 		apiErr = api.NewAPIError(api.ErrCodeInvalidParameter, err.Error(), api.ErrorTypeInvalidRequest)
-		_ = writeResponsesWSError(conn, apiErr)
+		_ = writeResponsesWSTurnError(c, conn, apiErr)
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, err)
 	}
 	effectiveModel := effectiveRequestModel(codexBody, model)
@@ -493,7 +447,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			errType, errCode, closeCode = api.ErrorTypeInvalidRequest, api.ErrCodeInvalidParameter, websocket.ClosePolicyViolation
 		}
 		apiErr = api.NewAPIError(errCode, msg, errType)
-		_ = writeResponsesWSError(conn, apiErr)
+		_ = writeResponsesWSTurnError(c, conn, apiErr)
 		return newResponsesWSCloseError(closeCode, apiErr.Message, apiErr)
 	}
 	// Only a request that passed payload, prompt-policy and API-key admission may
@@ -502,7 +456,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	// 被更新的连接取代时先给本连接发 1013 关闭帧再取消：Codex 客户端据此立即重试，
 	// 而不是在裸 1006 断开后静默等到自己的空闲超时。
 	notifyPreempted := func() {
-		closeResponsesWS(conn, websocket.CloseTryAgainLater, responsesWSSessionPreemptedCloseReason)
+		notifyResponsesWSPreempted(c, conn)
 	}
 	if preemptCtx, cleanupPreempt, armed := h.beginResponsesWSSessionPreemptionWithNotify(c.Request.Context(), c, rawBody, sessionIdentity, notifyPreempted); armed {
 		originalRequest := c.Request
@@ -517,7 +471,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	}
 	releaseAPIKeyConcurrency, concurrencyErr, ok := h.acquireAPIKeyConcurrencyForWebSocket(c)
 	if !ok {
-		_ = writeResponsesWSError(conn, concurrencyErr)
+		_ = writeResponsesWSTurnError(c, conn, concurrencyErr)
 		return nil
 	}
 	if releaseAPIKeyConcurrency != nil {
@@ -533,7 +487,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	compactionAffinity, compactionAffinityErr := h.resolveCompactionAffinity(c.Request.Context(), rawBody)
 	if compactionAffinityErr != nil {
 		apiErr = compactionProvenanceConflictAPIError()
-		_ = writeResponsesWSError(conn, apiErr)
+		_ = writeResponsesWSTurnError(c, conn, apiErr)
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, apiErr)
 	}
 	if compactionAffinity.Known {
@@ -559,7 +513,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			apiErr = api.NewAPIError(api.ErrorCode(fmt.Sprintf("upstream_%d", lastFailure.status)), message, api.ErrorTypeUpstream)
 		}
 		if !timeoutTerminalWritten {
-			_ = writeResponsesWSError(conn, apiErr)
+			_ = writeResponsesWSTurnError(c, conn, apiErr)
 			timeoutTerminalWritten = true
 		}
 		return newResponsesWSCloseError(websocket.CloseTryAgainLater, apiErr.Message, apiErr)
@@ -593,7 +547,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	continuationPinned := turnContinuation && turnHasBinding
 	continuationDegraded := false
 	if err := waitNativeWSCommit(c.Request.Context(), respCacheOwner, gjson.GetBytes(codexBody, "previous_response_id").String()); err != nil {
-		return writeResponsesWSError(conn, nativeResponsesWSContextError(responsesWSContextUnavailable(http.StatusServiceUnavailable, "context_commit_pending")))
+		return writeResponsesWSTurnError(c, conn, nativeResponsesWSContextError(responsesWSContextUnavailable(http.StatusServiceUnavailable, "context_commit_pending")))
 	}
 	turnReplay := newResponsesWSReplaySource(codexBody, respCacheOwner)
 	accountFilter = nativeWSReplayAccountFilter(accountFilter, turnReplay)
@@ -647,7 +601,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				if boundID, bound := h.store.SessionAffinityAccountID(affinityKey); bound {
 					if exclude := retryExclusions.ForSelection(); exclude[boundID] {
 						if contextErr := degradeContinuation(fmt.Sprintf("bound account %d excluded by this request", boundID), attempt+1); contextErr != nil {
-							return writeResponsesWSRecoveryError(conn, contextErr)
+							return writeResponsesWSTurnRecoveryError(c, conn, contextErr)
 						}
 					}
 				}
@@ -689,7 +643,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			if !claimContinuousRetrySuccessContext(c.Request.Context()) {
 				return errResponsesWSClientGone
 			}
-			_ = writeResponsesWSError(conn, apiErr)
+			_ = writeResponsesWSTurnError(c, conn, apiErr)
 			return nil
 		}
 		if attempt > 0 {
@@ -700,7 +654,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		turnReplay.setAccount(account)
 		if continuationDegraded && turnReplay.Input() == "" && turnReplay.err != nil {
 			h.store.Release(account)
-			return writeResponsesWSRecoveryError(conn, turnReplay.err)
+			return writeResponsesWSTurnRecoveryError(c, conn, turnReplay.err)
 		}
 		start := time.Now()
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
@@ -761,7 +715,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				ttftGuard.Stop()
 				upstreamCancel()
 				h.store.Release(account)
-				return writeResponsesWSRecoveryError(conn, contextErr)
+				return writeResponsesWSTurnRecoveryError(c, conn, contextErr)
 			}
 			// 降级时快照已经算过一次，直接复用展开后的 input，不再二次过滤。
 			attemptReplay = newResponsesWSReplaySourceFromRecovery(responsesInputRaw(upstreamBody), turnReplay)
@@ -802,14 +756,14 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				ttftGuard.Stop()
 				upstreamCancel()
 				h.store.Release(account)
-				return writeResponsesWSError(conn, api.NewAPIError(api.ErrorCode(ErrorCodeUpstreamWSConnectionCapacity), capacityErr.Error(), api.ErrorTypeServer))
+				return writeResponsesWSTurnError(c, conn, api.NewAPIError(api.ErrorCode(ErrorCodeUpstreamWSConnectionCapacity), capacityErr.Error(), api.ErrorTypeServer))
 			}
 			var continuationBusy *ResponsesContinuationBusyError
 			if errors.As(reqErr, &continuationBusy) {
 				ttftGuard.Stop()
 				upstreamCancel()
 				h.store.Release(account)
-				return writeResponsesWSError(conn, api.NewAPIError(api.ErrCodeServiceUnavailable, continuationBusy.Error(), api.ErrorTypeServer))
+				return writeResponsesWSTurnError(c, conn, api.NewAPIError(api.ErrCodeServiceUnavailable, continuationBusy.Error(), api.ErrorTypeServer))
 			}
 			var continuationLost *ResponsesContinuationLostError
 			if errors.As(reqErr, &continuationLost) {
@@ -818,17 +772,17 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				h.store.Release(account)
 				if canDegradeContinuation() {
 					if contextErr := degradeContinuation(continuationLost.Reason, attempt+1); contextErr != nil {
-						return writeResponsesWSRecoveryError(conn, contextErr)
+						return writeResponsesWSTurnRecoveryError(c, conn, contextErr)
 					}
 					continue
 				}
-				return writeResponsesWSRecoveryError(conn, nativeResponsesWSContextError(responsesWSContextUnavailable(http.StatusConflict, continuationLost.Reason)))
+				return writeResponsesWSTurnRecoveryError(c, conn, nativeResponsesWSContextError(responsesWSContextUnavailable(http.StatusConflict, continuationLost.Reason)))
 			}
 			if quotaErr := apiKeyModelRequestError(reqErr); quotaErr != nil {
 				ttftGuard.Stop()
 				h.store.Release(account)
 				// A model-specific budget must not close the connection for other models.
-				return writeResponsesWSError(conn, quotaErr.apiErr)
+				return writeResponsesWSTurnError(c, conn, quotaErr.apiErr)
 			}
 			timedOut := ttftGuard.TimedOut()
 			ttftGuard.Stop()
@@ -877,7 +831,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				}
 				apiErr = api.NewAPIError(api.ErrCodeUpstreamError, reqErr.Error(), api.ErrorTypeUpstream)
 				clientErr := responsesWSClientUpstreamAPIError(apiErr, hideUpstreamErrors)
-				_ = writeResponsesWSError(conn, clientErr)
+				_ = writeResponsesWSTurnError(c, conn, clientErr)
 				return newResponsesWSCloseError(websocket.CloseInternalServerErr, clientErr.Message, reqErr)
 			}
 			log.Printf("Responses WebSocket upstream request failed (attempt %d): %v", attempt+1, reqErr)
@@ -900,7 +854,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			if !claimContinuousRetrySuccessContext(c.Request.Context()) {
 				return errResponsesWSClientGone
 			}
-			_ = writeResponsesWSError(conn, clientErr)
+			_ = writeResponsesWSTurnError(c, conn, clientErr)
 			return newResponsesWSCloseError(websocket.CloseTryAgainLater, clientErr.Message, reqErr)
 		}
 
@@ -951,7 +905,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			if canDegradeContinuation() && isPreviousResponseNotFoundBody(errBody) {
 				if contextErr := degradeContinuation(fmt.Sprintf("upstream rejected previous_response_id on account %d", account.ID()), attempt+1); contextErr != nil {
 					h.store.Release(account)
-					return writeResponsesWSRecoveryError(conn, contextErr)
+					return writeResponsesWSTurnRecoveryError(c, conn, contextErr)
 				}
 				SyncCodexUsageState(h.store, account, resp)
 				h.store.Release(account)
@@ -1015,7 +969,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				if !claimContinuousRetrySuccessContext(c.Request.Context()) {
 					return errResponsesWSClientGone
 				}
-				_ = writeResponsesWSError(conn, newAPIPolicyDecisionAPIError(metadata))
+				_ = writeResponsesWSTurnError(c, conn, newAPIPolicyDecisionAPIError(metadata))
 				return nil
 			}
 
@@ -1024,7 +978,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			if !claimContinuousRetrySuccessContext(c.Request.Context()) {
 				return errResponsesWSClientGone
 			}
-			_ = writeResponsesWSError(conn, clientErr)
+			_ = writeResponsesWSTurnError(c, conn, clientErr)
 			return newResponsesWSCloseError(websocket.CloseTryAgainLater, clientErr.Message, apiErr)
 		}
 
@@ -1043,7 +997,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				// 账号已在流内释放，未记失败也未解绑：剥离续链 id 后原地再试一次。
 				// turn-state 钉号同样走这条路：上游已经说找不到 id，换号无益，剥 id 才能继续。
 				if contextErr := degradeContinuation(fmt.Sprintf("upstream rejected previous_response_id on account %d", account.ID()), attempt+1); contextErr != nil {
-					return writeResponsesWSRecoveryError(conn, contextErr)
+					return writeResponsesWSTurnRecoveryError(c, conn, contextErr)
 				}
 				continue
 			}
@@ -1078,7 +1032,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				if !claimContinuousRetrySuccessContext(c.Request.Context()) {
 					return errResponsesWSClientGone
 				}
-				_ = writeResponsesWSError(conn, clientErr)
+				_ = writeResponsesWSTurnError(c, conn, clientErr)
 				return newResponsesWSCloseError(websocket.CloseTryAgainLater, clientErr.Message, apiErr)
 			}
 			if errors.Is(err, errResponsesWSClientGone) {
@@ -1209,7 +1163,7 @@ func (h *Handler) streamResponsesWSUpstream(
 		if isResponsesSuccessTerminalEvent(gjson.GetBytes(payload, "type").String()) {
 			finishContextCommit = beginNativeWSCommit(respCacheOwner, gjson.GetBytes(payload, "response.id").String())
 		}
-		return writeResponsesWSMessage(conn, payload)
+		return writeResponsesWSTurnMessage(c, conn, payload)
 	}
 	// 首 token 前收到不可重试的 response.failed 时置位:不把原始失败帧透传给客户端,
 	// 循环外改写 error 帧并按错误类别用非正常 close code 关闭,
@@ -1479,7 +1433,7 @@ func (h *Handler) streamResponsesWSUpstream(
 			h.store.Release(account)
 			return errResponsesWSClientGone
 		}
-		_ = writeResponsesWSError(conn, newAPIPolicyDecisionAPIError(metadata))
+		_ = writeResponsesWSTurnError(c, conn, newAPIPolicyDecisionAPIError(metadata))
 		return nil
 	}
 	if shouldFallbackWebsocketMessageTooBigToHTTP(outcome, viaWebsocket, downstreamWroteBeforeCommit, c.Request.Context().Err(), writeErr) && !account.OpenAIResponsesUsesUpstreamWebsocket() {
@@ -1634,7 +1588,7 @@ func (h *Handler) streamResponsesWSUpstream(
 	}
 	if outcome.terminalLocal {
 		apiErr := api.NewAPIError(api.ErrCodeServerError, continuousRetryLocalFailureMessage, api.ErrorTypeServer)
-		_ = writeResponsesWSError(conn, apiErr)
+		_ = writeResponsesWSTurnError(c, conn, apiErr)
 		return newResponsesWSCloseError(websocket.CloseInternalServerErr, apiErr.Message, apiErr)
 	}
 	if c.Request.Context().Err() != nil {
@@ -1646,7 +1600,7 @@ func (h *Handler) streamResponsesWSUpstream(
 		if !claimContinuousRetrySuccessContext(c.Request.Context()) {
 			return errResponsesWSClientGone
 		}
-		_ = writeResponsesWSError(conn, apiErr)
+		_ = writeResponsesWSTurnError(c, conn, apiErr)
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, apiErr)
 	}
 	if writeErr != nil {
@@ -1670,7 +1624,7 @@ func (h *Handler) streamResponsesWSUpstream(
 		if !claimContinuousRetrySuccessContext(c.Request.Context()) {
 			return errResponsesWSClientGone
 		}
-		_ = writeResponsesWSError(conn, clientErr)
+		_ = writeResponsesWSTurnError(c, conn, clientErr)
 		if preserveErrorCode {
 			return nil
 		}
@@ -1694,7 +1648,7 @@ func (h *Handler) streamResponsesWSUpstream(
 		if !claimContinuousRetrySuccessContext(c.Request.Context()) {
 			return errResponsesWSClientGone
 		}
-		_ = writeResponsesWSError(conn, clientErr)
+		_ = writeResponsesWSTurnError(c, conn, clientErr)
 		return newResponsesWSCloseError(websocket.CloseTryAgainLater, clientErr.Message, apiErr)
 	}
 	if outcome.logStatusCode != http.StatusOK && len(terminalFailurePayload) == 0 {
@@ -1709,7 +1663,7 @@ func (h *Handler) streamResponsesWSUpstream(
 		if !claimContinuousRetrySuccessContext(c.Request.Context()) {
 			return errResponsesWSClientGone
 		}
-		_ = writeResponsesWSError(conn, clientErr)
+		_ = writeResponsesWSTurnError(c, conn, clientErr)
 		return newResponsesWSCloseError(websocket.CloseInternalServerErr, clientErr.Message, apiErr)
 	}
 	return nil
@@ -1775,10 +1729,10 @@ func (h *Handler) inspectPromptFilterOpenAIForWebSocket(c *gin.Context, conn *we
 			metadata := buildNewAPIPolicyDecisionMetadataWithSecret(policyContext.Identity, decision, verdict, cfg, rawBody, endpoint, model, policyEventID, policyContext.VerificationSecret)
 			writeNewAPIPolicyDecisionHeaders(c, metadata)
 			writePromptCyberRestrictionHeaders(c, restriction)
-			_ = writeResponsesWSError(conn, promptCyberRestrictionAPIError(restriction, newAPIPolicyDecisionDetails(metadata)))
+			_ = writeResponsesWSTurnError(c, conn, promptCyberRestrictionAPIError(restriction, newAPIPolicyDecisionDetails(metadata)))
 			return true, true
 		}
-		_ = writeResponsesWSError(conn, promptCyberRestrictionAPIError(restriction, nil))
+		_ = writeResponsesWSTurnError(c, conn, promptCyberRestrictionAPIError(restriction, nil))
 		return true, false
 	}
 	// Keep disabled filters off the WebSocket request-body hot path too.
@@ -1800,10 +1754,10 @@ func (h *Handler) inspectPromptFilterOpenAIForWebSocket(c *gin.Context, conn *we
 	if policyContext, verified := h.verifyNewAPIPolicyContext(c, cfg.Advanced.NewAPI, nil); verified {
 		metadata := buildNewAPIPolicyDecisionMetadataWithSecret(policyContext.Identity, evaluation.Decision, verdict, cfg, rawBody, endpoint, model, policyEventID, policyContext.VerificationSecret)
 		writeNewAPIPolicyDecisionHeaders(c, metadata)
-		_ = writeResponsesWSError(conn, newAPILocalPromptPolicyDecisionAPIError(metadata, cfg))
+		_ = writeResponsesWSTurnError(c, conn, newAPILocalPromptPolicyDecisionAPIError(metadata, cfg))
 		return true, true
 	}
-	_ = writeResponsesWSError(conn, api.NewAPIError(errorCode, errorMessage, api.ErrorTypeInvalidRequest))
+	_ = writeResponsesWSTurnError(c, conn, api.NewAPIError(errorCode, errorMessage, api.ErrorTypeInvalidRequest))
 	return true, false
 }
 

@@ -34,7 +34,7 @@ type ResponsesWebSocketControlLease struct {
 type responsesWSControlSession struct {
 	mu       sync.Mutex
 	conn     *websocket.Conn
-	active   *responsesWSControlTurn
+	active   map[string]*responsesWSControlTurn
 	recent   map[string]struct{}
 	order    []string
 	next     int
@@ -55,7 +55,7 @@ type responsesWSControlTurn struct {
 
 func newResponsesWSControlSession(conn *websocket.Conn) *responsesWSControlSession {
 	return &responsesWSControlSession{
-		conn: conn, recent: make(map[string]struct{}),
+		conn: conn, recent: make(map[string]struct{}), active: make(map[string]*responsesWSControlTurn),
 		messages: make(chan responsesWSInboundMessage, responsesWSInboundQueueCapacity),
 		done:     make(chan struct{}),
 	}
@@ -109,8 +109,12 @@ func beginResponsesWSControlTurn(c *gin.Context) func() {
 		return func() {}
 	}
 	turn := &responsesWSControlTurn{session: s}
+	streamID := ""
+	if lane := responsesWSLaneForContext(c); lane != nil {
+		streamID = lane.streamID
+	}
 	s.mu.Lock()
-	s.active = turn
+	s.active[streamID] = turn
 	s.mu.Unlock()
 	request := c.Request
 	c.Request = request.WithContext(context.WithValue(request.Context(), responsesWSControlTurnKey{}, turn))
@@ -119,8 +123,8 @@ func beginResponsesWSControlTurn(c *gin.Context) func() {
 		turn.ended, turn.binding = true, ResponsesWebSocketControlBinding{}
 		turn.mu.Unlock()
 		s.mu.Lock()
-		if s.active == turn {
-			s.active = nil
+		if s.active[streamID] == turn {
+			delete(s.active, streamID)
 		}
 		s.mu.Unlock()
 		c.Request = request
@@ -244,15 +248,33 @@ func (s *responsesWSControlSession) remember(responseID string) {
 func (s *responsesWSControlSession) interrupt(payload []byte, responseID string) *api.APIError {
 	s.mu.Lock()
 	_, completed := s.recent[responseID]
-	turn := s.active
 	s.mu.Unlock()
 	if completed {
 		return nil
 	}
+	turn := s.findTurn(responseID)
 	if turn == nil {
 		return responsesWSInactiveResponseError()
 	}
 	return turn.interrupt(payload, responseID)
+}
+
+func (s *responsesWSControlSession) findTurn(responseID string) *responsesWSControlTurn {
+	s.mu.Lock()
+	turns := make([]*responsesWSControlTurn, 0, len(s.active))
+	for _, turn := range s.active {
+		turns = append(turns, turn)
+	}
+	s.mu.Unlock()
+	for _, turn := range turns {
+		turn.mu.Lock()
+		matches := turn.responseID == responseID
+		turn.mu.Unlock()
+		if matches {
+			return turn
+		}
+	}
+	return nil
 }
 
 func (turn *responsesWSControlTurn) interrupt(payload []byte, responseID string) *api.APIError {
