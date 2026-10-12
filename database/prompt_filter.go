@@ -54,8 +54,8 @@ type promptFilterAuditJob struct {
 
 type promptFilterAuditQueue struct {
 	db        *DB
-	high      chan promptFilterAuditJob
-	low       chan promptFilterAuditJob
+	high      chan *promptFilterAuditJob
+	low       chan *promptFilterAuditJob
 	ctx       context.Context
 	stop      chan struct{}
 	done      chan struct{}
@@ -80,7 +80,7 @@ type promptFilterAuditQueue struct {
 func newPromptFilterAuditQueue(db *DB) *promptFilterAuditQueue {
 	ctx, cancel := context.WithCancel(context.Background())
 	queue := &promptFilterAuditQueue{
-		db: db, high: make(chan promptFilterAuditJob, promptFilterAuditHighCapacity), low: make(chan promptFilterAuditJob, promptFilterAuditLowCapacity),
+		db: db, high: make(chan *promptFilterAuditJob, promptFilterAuditHighCapacity), low: make(chan *promptFilterAuditJob, promptFilterAuditLowCapacity),
 		ctx: ctx, stop: make(chan struct{}), done: make(chan struct{}), cancel: cancel,
 	}
 	return queue
@@ -199,7 +199,7 @@ func (q *promptFilterAuditQueue) enqueueJob(job promptFilterAuditJob, priority P
 		q.releaseBytes(priority, job.bytes)
 		q.drop(priority, "closed")
 		return false
-	case queue <- job:
+	case queue <- &job:
 		q.enqueued.Add(1)
 		return true
 	default:
@@ -298,10 +298,11 @@ func (q *promptFilterAuditQueue) worker() {
 				return
 			}
 		}()
+		job = nil
 	}
 }
 
-func (q *promptFilterAuditQueue) next() (promptFilterAuditJob, PromptFilterLogPriority, bool) {
+func (q *promptFilterAuditQueue) next() (*promptFilterAuditJob, PromptFilterLogPriority, bool) {
 	select {
 	case input := <-q.high:
 		return input, PromptFilterLogPriorityHigh, true
@@ -317,7 +318,7 @@ func (q *promptFilterAuditQueue) next() (promptFilterAuditJob, PromptFilterLogPr
 	}
 }
 
-func (q *promptFilterAuditQueue) nextDraining() (promptFilterAuditJob, PromptFilterLogPriority, bool) {
+func (q *promptFilterAuditQueue) nextDraining() (*promptFilterAuditJob, PromptFilterLogPriority, bool) {
 	select {
 	case input := <-q.high:
 		return input, PromptFilterLogPriorityHigh, true
@@ -329,7 +330,7 @@ func (q *promptFilterAuditQueue) nextDraining() (promptFilterAuditJob, PromptFil
 	case input := <-q.low:
 		return input, PromptFilterLogPriorityLow, true
 	default:
-		return promptFilterAuditJob{}, PromptFilterLogPriorityLow, false
+		return nil, PromptFilterLogPriorityLow, false
 	}
 }
 

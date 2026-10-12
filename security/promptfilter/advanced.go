@@ -6,7 +6,6 @@ import (
 	"compress/zlib"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"html"
 	"io"
@@ -19,6 +18,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	json "github.com/goccy/go-json"
 	"golang.org/x/text/transform"
 	"golang.org/x/text/unicode/norm"
 )
@@ -1930,9 +1930,10 @@ type decodedSafetyHintAutomaton struct {
 }
 
 type decodedSafetyHintNode struct {
-	next    map[byte]int
-	failure int
-	outputs []string
+	next             map[byte]int
+	singleTransition uint64
+	failure          int
+	outputs          []string
 }
 
 var (
@@ -2090,6 +2091,7 @@ func newDecodedSafetyHintAutomaton(hints map[string]struct{}) *decodedSafetyHint
 			}
 		}
 	}
+	automaton.compactTransitions()
 	return automaton
 }
 
@@ -2102,7 +2104,7 @@ func (a *decodedSafetyHintAutomaton) match(text string) map[string]struct{} {
 	for index := 0; index < len(text); index++ {
 		value := text[index]
 		for state != 0 {
-			if nextState, exists := a.nodes[state].next[value]; exists {
+			if nextState, exists := a.nodes[state].transition(value); exists {
 				state = nextState
 				goto collectOutputs
 			}
@@ -2152,7 +2154,7 @@ func (a *decodedSafetyHintAutomaton) matchNormalizedSourceWithTransform(text str
 	pendingSpace := false
 	emit := func(value byte) {
 		for state != 0 {
-			if nextState, exists := a.nodes[state].next[value]; exists {
+			if nextState, exists := a.nodes[state].transition(value); exists {
 				state = nextState
 				goto collectOutputs
 			}

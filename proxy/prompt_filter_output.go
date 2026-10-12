@@ -34,6 +34,7 @@ func (b *wsPromptOutputBuffer) Push(message []byte) ([][]byte, error) {
 	for len(b.messages) > 1 && b.size-len(b.messages[0]) >= b.cfg.Advanced.Output.BufferBytes {
 		release = append(release, b.messages[0])
 		b.size -= len(b.messages[0])
+		b.messages[0] = nil
 		b.messages = b.messages[1:]
 	}
 	return release, nil

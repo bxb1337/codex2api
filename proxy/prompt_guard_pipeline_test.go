@@ -522,7 +522,7 @@ func TestPromptGuardAsyncShadowQueueSaturationDropsWithoutSynchronousAudit(t *te
 	saturated.desiredWorkers = 1
 	saturated.pendingJobs = 1
 	saturated.pendingBytes = 1
-	saturated.queue <- promptGuardShadowAuditJob{}
+	saturated.queue <- &promptGuardShadowAuditJob{}
 	defaultPromptGuardShadowDispatcher = saturated
 	t.Cleanup(func() { defaultPromptGuardShadowDispatcher = originalDispatcher })
 
@@ -583,7 +583,7 @@ func TestPromptGuardAsyncShadowLegacySyncOverflowStillDropsWithoutBlocking(t *te
 	saturated.desiredWorkers = 1
 	saturated.pendingJobs = 1
 	saturated.pendingBytes = 1
-	saturated.queue <- promptGuardShadowAuditJob{}
+	saturated.queue <- &promptGuardShadowAuditJob{}
 	defaultPromptGuardShadowDispatcher = saturated
 	t.Cleanup(func() { defaultPromptGuardShadowDispatcher = originalDispatcher })
 

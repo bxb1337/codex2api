@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"io"
 	"regexp"
 	"sort"
@@ -14,6 +13,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	json "github.com/goccy/go-json"
 )
 
 type Signal struct {
@@ -57,34 +58,34 @@ type currentUserPrecheck struct {
 }
 
 type Decision struct {
-	Enabled               bool          `json:"enabled"`
-	Mode                  string        `json:"mode"`
-	Profile               string        `json:"profile"`
-	ApplicationPromptKind string        `json:"application_prompt_kind,omitempty"`
+	Enabled               bool   `json:"enabled"`
+	Mode                  string `json:"mode"`
+	Profile               string `json:"profile"`
+	ApplicationPromptKind string `json:"application_prompt_kind,omitempty"`
 	// ApprovalReviewModelUntrusted names the requested model of a well-formed
 	// Codex auto-review request that was scanned as ordinary input because the
 	// model is not listed in Enforcement.ApprovalReviewModels.
-	ApprovalReviewModelUntrusted string `json:"approval_review_model_untrusted,omitempty"`
-	Action                string        `json:"action"`
-	WouldAction           string        `json:"would_action"`
-	Score                 int           `json:"score"`
-	RawScore              int           `json:"raw_score"`
-	AuditScore            int           `json:"audit_score,omitempty"`
-	AuditRawScore         int           `json:"audit_raw_score,omitempty"`
-	ReasonCode            string        `json:"reason_code,omitempty"`
-	Reason                string        `json:"reason,omitempty"`
-	Terminal              bool          `json:"terminal,omitempty"`
-	StrikeEligible        bool          `json:"strike_eligible,omitempty"`
-	Truncated             bool          `json:"truncated,omitempty"`
-	CurrentUserTruncated  bool          `json:"current_user_truncated,omitempty"`
-	AuxiliaryTruncated    bool          `json:"auxiliary_truncated,omitempty"`
-	PrimaryOrigin         SegmentOrigin `json:"primary_origin,omitempty"`
-	PrimaryDetector       string        `json:"primary_detector,omitempty"`
-	Signals               []Signal      `json:"signals,omitempty"`
-	Errors                []string      `json:"errors,omitempty"`
-	ReviewText            string        `json:"-"`
-	legacyVerdict         Verdict
-	deferredAudit         *DeferredAudit
+	ApprovalReviewModelUntrusted string        `json:"approval_review_model_untrusted,omitempty"`
+	Action                       string        `json:"action"`
+	WouldAction                  string        `json:"would_action"`
+	Score                        int           `json:"score"`
+	RawScore                     int           `json:"raw_score"`
+	AuditScore                   int           `json:"audit_score,omitempty"`
+	AuditRawScore                int           `json:"audit_raw_score,omitempty"`
+	ReasonCode                   string        `json:"reason_code,omitempty"`
+	Reason                       string        `json:"reason,omitempty"`
+	Terminal                     bool          `json:"terminal,omitempty"`
+	StrikeEligible               bool          `json:"strike_eligible,omitempty"`
+	Truncated                    bool          `json:"truncated,omitempty"`
+	CurrentUserTruncated         bool          `json:"current_user_truncated,omitempty"`
+	AuxiliaryTruncated           bool          `json:"auxiliary_truncated,omitempty"`
+	PrimaryOrigin                SegmentOrigin `json:"primary_origin,omitempty"`
+	PrimaryDetector              string        `json:"primary_detector,omitempty"`
+	Signals                      []Signal      `json:"signals,omitempty"`
+	Errors                       []string      `json:"errors,omitempty"`
+	ReviewText                   string        `json:"-"`
+	legacyVerdict                Verdict
+	deferredAudit                *DeferredAudit
 }
 
 // DeferredAudit is an immutable snapshot of auxiliary shadow-only content
@@ -102,7 +103,7 @@ func (d Decision) DeferredAudit() (DeferredAudit, bool) {
 		return DeferredAudit{}, false
 	}
 	audit := *d.deferredAudit
-	audit.envelope.Segments = append([]Segment(nil), audit.envelope.Segments...)
+	audit.envelope = ownBoundedEnvelope(audit.envelope)
 	audit.request.Envelope = audit.envelope
 	return audit, true
 }
@@ -110,11 +111,7 @@ func (d Decision) DeferredAudit() (DeferredAudit, bool) {
 func (a DeferredAudit) SegmentCount() int { return len(a.envelope.Segments) }
 
 func (a DeferredAudit) ByteSize() int {
-	total := 0
-	for _, segment := range a.envelope.Segments {
-		total += len(segment.Text)
-	}
-	return total
+	return envelopeRetainedTextBytes(a.envelope)
 }
 
 func (d Decision) LegacyVerdict() Verdict {
@@ -1373,7 +1370,7 @@ func (d LegacyRegexDetector) Detect(_ context.Context, envelope RequestEnvelope,
 }
 
 type exactGuardSegmentCacheKey struct {
-	engine           *Engine
+	engineDigest     [sha256.Size]byte
 	revision         string
 	kind             exactGuardInspectionKind
 	textHash         [sha256.Size]byte
@@ -1407,8 +1404,7 @@ type exactGuardSegmentFlight struct {
 // exactGuardSegmentCache is a process-wide bounded LRU. Keys contain no prompt
 // text, and values omit FullText, TextPreview, and MatchContext; request
 // evidence is rebuilt from the caller's exact current text on every cache hit.
-// The Engine identity acts as the complete normalized rule/config fingerprint,
-// so any rule or normalization update automatically misses old entries.
+// 配置指纹涵盖完整检测语义，规则变化自动失效，key 不再持有旧 Engine。
 type exactGuardSegmentCache struct {
 	mu       sync.Mutex
 	entries  map[exactGuardSegmentCacheKey]*list.Element
@@ -1511,7 +1507,7 @@ func (c *exactGuardSegmentCache) inspectComputed(
 		return compute()
 	}
 	key := exactGuardSegmentCacheKey{
-		engine:           engine,
+		engineDigest:     engine.fingerprint,
 		revision:         revision,
 		kind:             kind,
 		textHash:         textHash,

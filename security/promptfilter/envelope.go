@@ -5,6 +5,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/codex2api/internal/jsonbody"
 	"github.com/tidwall/gjson"
 )
 
@@ -74,24 +75,24 @@ type Segment struct {
 }
 
 type RequestEnvelope struct {
-	Endpoint             string      `json:"endpoint"`
-	Protocol             Protocol    `json:"protocol"`
-	Transport            Transport   `json:"transport"`
-	RequestedModel       string      `json:"requested_model,omitempty"`
-	EffectiveModel       string      `json:"effective_model,omitempty"`
-	ModelFamily          ModelFamily `json:"model_family"`
-	Segments             []Segment   `json:"segments"`
-	AdapterUnclassified  bool        `json:"adapter_unclassified,omitempty"`
+	Endpoint            string      `json:"endpoint"`
+	Protocol            Protocol    `json:"protocol"`
+	Transport           Transport   `json:"transport"`
+	RequestedModel      string      `json:"requested_model,omitempty"`
+	EffectiveModel      string      `json:"effective_model,omitempty"`
+	ModelFamily         ModelFamily `json:"model_family"`
+	Segments            []Segment   `json:"segments"`
+	AdapterUnclassified bool        `json:"adapter_unclassified,omitempty"`
 	// AdapterUnclassifiedTypes records the offending typed-payload names (bounded,
 	// deduped) so the non-punitive adapter audit can surface which future block or
 	// item type went unrecognized, instead of only flagging that one did.
 	AdapterUnclassifiedTypes []string `json:"adapter_unclassified_types,omitempty"`
-	Truncated            bool        `json:"truncated,omitempty"`
-	CurrentUserTruncated bool        `json:"current_user_truncated,omitempty"`
-	AuxiliaryTruncated   bool        `json:"auxiliary_truncated,omitempty"`
-	currentUserExactText string
-	currentUserPrecheck  *currentUserPrecheck
-	precheckIncomplete   bool
+	Truncated                bool     `json:"truncated,omitempty"`
+	CurrentUserTruncated     bool     `json:"current_user_truncated,omitempty"`
+	AuxiliaryTruncated       bool     `json:"auxiliary_truncated,omitempty"`
+	currentUserExactText     string
+	currentUserPrecheck      *currentUserPrecheck
+	precheckIncomplete       bool
 	// untrustedApprovalModel is the requested model of a structurally valid
 	// Codex auto-review request whose model is not in ApprovalReviewModels.
 	untrustedApprovalModel string
@@ -221,8 +222,11 @@ func buildEnvelopeWithBudget(body []byte, endpoint string, requestedModel string
 	if transport != TransportWebSocket {
 		transport = TransportHTTP
 	}
-	if requestedModel = strings.TrimSpace(requestedModel); requestedModel == "" && gjson.ValidBytes(body) {
-		requestedModel = strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	source := jsonbody.ReadOnlyText(body)
+	document := gjson.Parse(source)
+	valid := gjson.Valid(source)
+	if requestedModel = strings.TrimSpace(requestedModel); requestedModel == "" && valid {
+		requestedModel = strings.TrimSpace(document.Get("model").String())
 	}
 	envelope := RequestEnvelope{
 		Endpoint:       strings.TrimSpace(endpoint),
@@ -234,10 +238,10 @@ func buildEnvelopeWithBudget(body []byte, endpoint string, requestedModel string
 	}
 	if protocol == ProtocolUnknown {
 		envelope.AdapterUnclassified = true
-		return envelope
+		return ownEnvelopeMetadata(envelope)
 	}
-	if len(body) == 0 || !gjson.ValidBytes(body) {
-		return envelope
+	if len(body) == 0 || !valid {
+		return ownEnvelopeMetadata(envelope)
 	}
 
 	builder := envelopeBuilder{
@@ -254,24 +258,24 @@ func buildEnvelopeWithBudget(body []byte, endpoint string, requestedModel string
 	}
 	switch protocol {
 	case ProtocolResponses:
-		builder.appendResult(OriginInstructions, "developer", gjson.GetBytes(body, "instructions"))
-		builder.appendMessages(gjson.GetBytes(body, "input"))
-		builder.appendResult(OriginCurrentUser, "user", gjson.GetBytes(body, "prompt"))
+		builder.appendResult(OriginInstructions, "developer", document.Get("instructions"))
+		builder.appendMessages(document.Get("input"))
+		builder.appendResult(OriginCurrentUser, "user", document.Get("prompt"))
 		if !envelopeHasOrigin(envelope, OriginCurrentUser) {
-			builder.appendMessages(gjson.GetBytes(body, "messages"))
+			builder.appendMessages(document.Get("messages"))
 		}
 	case ProtocolChat:
-		builder.appendResult(OriginInstructions, "developer", gjson.GetBytes(body, "instructions"))
-		builder.appendMessages(gjson.GetBytes(body, "messages"))
+		builder.appendResult(OriginInstructions, "developer", document.Get("instructions"))
+		builder.appendMessages(document.Get("messages"))
 	case ProtocolMessages:
-		builder.appendResult(OriginSystem, "system", gjson.GetBytes(body, "system"))
-		builder.appendMessages(gjson.GetBytes(body, "messages"))
+		builder.appendResult(OriginSystem, "system", document.Get("system"))
+		builder.appendMessages(document.Get("messages"))
 	case ProtocolImages:
-		builder.appendResult(OriginCurrentUser, "user", gjson.GetBytes(body, "prompt"))
-		builder.appendResult(OriginCurrentUser, "user", gjson.GetBytes(body, "style"))
-		builder.appendAttachmentReferences(gjson.ParseBytes(body), "user")
+		builder.appendResult(OriginCurrentUser, "user", document.Get("prompt"))
+		builder.appendResult(OriginCurrentUser, "user", document.Get("style"))
+		builder.appendAttachmentReferences(document, "user")
 	case ProtocolSearch:
-		builder.appendResult(OriginCurrentUser, "user", gjson.GetBytes(body, "commands.search_query.#.q"))
+		builder.appendResult(OriginCurrentUser, "user", document.Get("commands.search_query.#.q"))
 	}
 	builder.finalize()
 	return envelope
@@ -419,7 +423,7 @@ func applyGuardPerformanceBudgetWithScanner(envelope RequestEnvelope, performanc
 		return selected[i].Sequence < selected[j].Sequence
 	})
 	envelope.Segments = selected
-	return envelope
+	return ownBoundedEnvelope(envelope)
 }
 
 type segmentSampleAllocation struct {
@@ -840,7 +844,7 @@ func (b *envelopeBuilder) finalize() {
 		MaxAuxiliaryBytes:   b.auxiliaryBytes,
 	}, max(b.currentUserBytes, b.auxiliaryBytes))
 	if bounded.CurrentUserTruncated && b.exactSourceOK && len(b.exactSourceParts) > 0 {
-		bounded.currentUserExactText = strings.TrimSpace(strings.Join(b.exactSourceParts, " "))
+		bounded.currentUserExactText = strings.Clone(strings.TrimSpace(strings.Join(b.exactSourceParts, " ")))
 	}
 	if bounded.CurrentUserTruncated && b.exactCapture && !b.exactSourceOK {
 		bounded.precheckIncomplete = true

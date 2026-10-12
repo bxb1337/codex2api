@@ -50,7 +50,7 @@ type promptGuardShadowAuditJob struct {
 }
 
 type promptGuardShadowDispatcher struct {
-	queue chan promptGuardShadowAuditJob
+	queue chan *promptGuardShadowAuditJob
 	mu    sync.Mutex
 
 	workers        int
@@ -68,7 +68,7 @@ const (
 )
 
 func newPromptGuardShadowDispatcher() *promptGuardShadowDispatcher {
-	return &promptGuardShadowDispatcher{queue: make(chan promptGuardShadowAuditJob, promptGuardShadowQueueCapacity)}
+	return &promptGuardShadowDispatcher{queue: make(chan *promptGuardShadowAuditJob, promptGuardShadowQueueCapacity)}
 }
 
 func (d *promptGuardShadowDispatcher) enqueue(job promptGuardShadowAuditJob, workers int, queueLimit int) (promptGuardShadowEnqueueStatus, string) {
@@ -117,7 +117,7 @@ func (d *promptGuardShadowDispatcher) enqueue(job promptGuardShadowAuditJob, wor
 	}
 
 	select {
-	case d.queue <- job:
+	case d.queue <- &job:
 		promptGuardShadowEnqueued.Add(1)
 		return promptGuardShadowEnqueueAccepted, ""
 	default:
@@ -137,7 +137,7 @@ func (d *promptGuardShadowDispatcher) worker() {
 				}
 			}()
 			ctx, cancel := context.WithTimeout(context.Background(), promptGuardShadowTaskTimeout)
-			err := runDeferredPromptGuardAudit(ctx, job)
+			err := runDeferredPromptGuardAudit(ctx, *job)
 			cancel()
 			if err != nil {
 				promptGuardShadowFailures.Add(1)
@@ -146,6 +146,7 @@ func (d *promptGuardShadowDispatcher) worker() {
 			}
 			promptGuardShadowCompleted.Add(1)
 		}()
+		job = nil
 		if d.retireWorkerIfExcess() {
 			return
 		}
@@ -389,19 +390,18 @@ func (h *Handler) scheduleDeferredPromptGuardAudit(c *gin.Context, endpoint stri
 	if !ok {
 		return
 	}
-	envelopeMeta := evaluation.Envelope
-	envelopeMeta.Segments = nil
+	envelopeMeta := evaluation.Envelope.AuditMetadata()
 	job := promptGuardShadowAuditJob{
 		handler:        h,
 		audit:          audit,
 		auditContext:   h.capturePromptFilterAuditContext(c),
 		envelope:       envelopeMeta,
-		currentPreview: promptfilter.RedactedPreview(evaluation.Verdict.TextPreview, 500),
+		currentPreview: strings.Clone(promptfilter.RedactedPreview(evaluation.Verdict.TextPreview, 500)),
 		currentChars:   evaluation.Verdict.ExtractedChars,
-		endpoint:       endpoint,
-		model:          model,
-		source:         source,
-		errorCode:      errorCode,
+		endpoint:       strings.Clone(endpoint),
+		model:          strings.Clone(model),
+		source:         strings.Clone(source),
+		errorCode:      strings.Clone(errorCode),
 		logMatches:     evaluation.Config.LogMatches,
 		queuedAt:       time.Now(),
 	}

@@ -1,19 +1,19 @@
 package promptfilter
 
 import (
-	"encoding/json"
+	"crypto/sha256"
 	"fmt"
 	"html"
 	"io"
-	"log"
 	"net/url"
 	"regexp"
 	"regexp/syntax"
 	"sort"
 	"strings"
-	"sync"
 	"unicode"
 	"unicode/utf8"
+
+	json "github.com/goccy/go-json"
 )
 
 const (
@@ -138,6 +138,7 @@ type Verdict struct {
 }
 
 type Engine struct {
+	fingerprint            [sha256.Size]byte
 	cfg                    Config
 	patterns               []compiledPattern
 	sensitiveWords         []string
@@ -148,6 +149,7 @@ type Engine struct {
 }
 
 type compiledPattern struct {
+	builtin               bool
 	cfg                   PatternConfig
 	re                    *regexp.Regexp
 	requires              []string
@@ -286,21 +288,6 @@ func NormalizeConfig(cfg Config) Config {
 	return cfg
 }
 
-var engineCache sync.Map // map[string]*Engine
-
-func engineForConfig(cfg Config) (*Engine, error) {
-	key := engineCacheKey(cfg)
-	if cached, ok := engineCache.Load(key); ok {
-		return cached.(*Engine), nil
-	}
-	engine, err := NewEngine(cfg)
-	if err != nil {
-		return nil, err
-	}
-	actual, _ := engineCache.LoadOrStore(key, engine)
-	return actual.(*Engine), nil
-}
-
 func engineCacheKey(cfg Config) string {
 	cfg = NormalizeConfig(cfg)
 	key := struct {
@@ -338,127 +325,6 @@ func engineCacheKey(cfg Config) string {
 		return fmt.Sprintf("%t|%s|%d|%d|%t|%d|%s|%s|%s|%s", cfg.Enabled, cfg.Mode, cfg.Threshold, cfg.StrictThreshold, cfg.StrictTerminalEnabled, cfg.MaxTextLength, cfg.SensitiveWords, MarshalCustomPatterns(cfg.CustomPatterns), MarshalDisabledPatterns(cfg.DisabledPatterns), string(detectionAdvanced))
 	}
 	return string(data)
-}
-
-func NewEngine(cfg Config) (*Engine, error) {
-	cfg = NormalizeConfig(cfg)
-	// The regex engine never uses remote-review credentials. Clear them before
-	// the normalized config is retained by the process-wide engine cache so
-	// operational credential rotation cannot leave old secrets reachable.
-	cfg.Review.APIKey = ""
-	disabled := disabledPatternSet(cfg.DisabledPatterns)
-	merged := append([]PatternConfig{}, defaultPatternConfigs...)
-	merged = append(merged, cfg.CustomPatterns...)
-	builtinCount := len(defaultPatternConfigs)
-
-	patterns := make([]compiledPattern, 0, len(merged))
-	authorizedPentestAllowed := cfg.Advanced.Enforcement.AuthorizedPentestAllowed
-patternLoop:
-	for index, pattern := range merged {
-		custom := index >= builtinCount
-		pattern = resolveAuthorizationExcludes(pattern, authorizedPentestAllowed)
-		pattern.Name = strings.TrimSpace(pattern.Name)
-		pattern.Pattern = strings.TrimSpace(pattern.Pattern)
-		pattern.Category = strings.TrimSpace(pattern.Category)
-		if disabled[strings.ToLower(pattern.Name)] {
-			continue
-		}
-		if pattern.Enabled != nil && !*pattern.Enabled {
-			continue
-		}
-		// Built-ins are trusted release artifacts: a compile failure is fatal so
-		// tests and startup validation expose the broken release. Custom rules
-		// are untrusted persisted input; quarantine one bad or over-broad rule
-		// without disabling every built-in detector for the request.
-		if custom {
-			if issue := AuditPatternConfig(pattern); issue != nil {
-				log.Printf("prompt filter: custom rule skipped name=%q code=%s message=%s", pattern.Name, issue.Code, issue.Message)
-				continue
-			}
-		}
-		if pattern.Name == "" || (pattern.Pattern == "" && len(pattern.AllPatterns) == 0 && len(pattern.AnyPatterns) == 0) || pattern.Weight <= 0 {
-			continue
-		}
-		var re *regexp.Regexp
-		var err error
-		if pattern.Pattern != "" {
-			re, err = regexp.Compile(pattern.Pattern)
-			if err != nil {
-				if custom {
-					log.Printf("prompt filter: custom rule skipped name=%q code=%s message=%s", pattern.Name, PatternQuarantineInvalidRegex, err)
-					continue
-				}
-				return nil, fmt.Errorf("compile pattern %q: %w", pattern.Name, err)
-			}
-		}
-		compileList := func(items []string) ([]*regexp.Regexp, error) {
-			out := make([]*regexp.Regexp, 0, len(items))
-			for _, item := range items {
-				if strings.TrimSpace(item) == "" {
-					return nil, fmt.Errorf("empty regex")
-				}
-				x, e := regexp.Compile(item)
-				if e != nil {
-					return nil, e
-				}
-				out = append(out, x)
-			}
-			return out, nil
-		}
-		all, err := compileList(pattern.AllPatterns)
-		if err != nil {
-			if custom {
-				log.Printf("prompt filter: custom rule skipped name=%q code=%s field=all_patterns message=%s", pattern.Name, PatternQuarantineInvalidRegex, err)
-				continue patternLoop
-			}
-			return nil, fmt.Errorf("compile all pattern %q: %w", pattern.Name, err)
-		}
-		any, err := compileList(pattern.AnyPatterns)
-		if err != nil {
-			if custom {
-				log.Printf("prompt filter: custom rule skipped name=%q code=%s field=any_patterns message=%s", pattern.Name, PatternQuarantineInvalidRegex, err)
-				continue patternLoop
-			}
-			return nil, fmt.Errorf("compile any pattern %q: %w", pattern.Name, err)
-		}
-		exclude, err := compileList(pattern.ExcludePatterns)
-		if err != nil {
-			if custom {
-				log.Printf("prompt filter: custom rule skipped name=%q code=%s field=exclude_patterns message=%s", pattern.Name, PatternQuarantineInvalidRegex, err)
-				continue patternLoop
-			}
-			return nil, fmt.Errorf("compile exclude pattern %q: %w", pattern.Name, err)
-		}
-		compiled := compiledPattern{
-			cfg:      pattern,
-			re:       re,
-			requires: patternRequires(pattern.Pattern),
-			all:      all, any: any, exclude: exclude,
-		}
-		compiled.guaranteedHintClauses = decodedSafetyGuaranteedHintClauses(compiled)
-		patterns = append(patterns, compiled)
-	}
-	sensitiveWords := parseSensitiveWords(cfg.SensitiveWords)
-
-	engine := &Engine{
-		cfg:                    cfg,
-		patterns:               patterns,
-		sensitiveWords:         sensitiveWords,
-		literalIndex:           buildLiteralIndex(patterns, sensitiveWords),
-		viewMatchHintAutomaton: buildGuaranteedPatternHintAutomaton(patterns),
-	}
-	// Keep decoded-rule prioritization bound to this exact immutable Engine.
-	// A process-global scan over cached engines can leak another tenant/config's
-	// custom rules into this request's encoded-candidate budget.
-	priorityScanner := buildDecodedSafetyPriorityScanner(patterns)
-	priorityScanner.sensitiveWords = sensitiveWords
-	priorityScanner.hintIndex = buildDecodedSafetyHintIndex(priorityScanner)
-	engine.decodedPriorityScanner = priorityScanner
-	exactPrecheckScanner := buildDecodedSafetyExactPrecheckScanner(patterns, cfg.Threshold)
-	exactPrecheckScanner.sensitiveWords = sensitiveWords
-	exactPrecheckScanner.hintIndex = buildDecodedSafetyHintIndex(exactPrecheckScanner)
-	engine.exactPrecheckScanner = exactPrecheckScanner
-	return engine, nil
 }
 
 func BuiltinPatternConfigs() []PatternConfig {
