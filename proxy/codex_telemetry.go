@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bytes"
-	"encoding/json"
 	"io"
 	"log"
 	"math/rand/v2"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	json "github.com/goccy/go-json"
 	"github.com/tidwall/gjson"
 )
 

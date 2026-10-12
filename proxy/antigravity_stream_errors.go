@@ -3,7 +3,6 @@ package proxy
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/codex2api/auth"
+	json "github.com/goccy/go-json"
 	"github.com/tidwall/gjson"
 )
 

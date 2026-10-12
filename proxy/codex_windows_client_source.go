@@ -3,13 +3,14 @@ package proxy
 import (
 	"archive/zip"
 	"context"
-	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+
+	json "github.com/goccy/go-json"
 )
 
 type codexWindowsUpdate struct {

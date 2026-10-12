@@ -4,13 +4,14 @@ import (
 	"archive/zip"
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"sync"
+
+	json "github.com/goccy/go-json"
 )
 
 const (

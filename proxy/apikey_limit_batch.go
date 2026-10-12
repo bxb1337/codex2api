@@ -2,11 +2,11 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"time"
 
 	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
+	json "github.com/goccy/go-json"
 )
 
 type apiKeyLimitBatchContextKey struct{}

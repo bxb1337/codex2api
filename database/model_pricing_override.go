@@ -2,10 +2,11 @@ package database
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync/atomic"
+
+	json "github.com/goccy/go-json"
 )
 
 // 模型定价覆盖来源。custom 由管理员手填(最高优先级)，synced 由「从 JSON URL 同步」写入。

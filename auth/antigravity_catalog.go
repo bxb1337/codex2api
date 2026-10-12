@@ -2,13 +2,14 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
 
 const antigravityCatalogRefreshInterval = 30 * time.Minute

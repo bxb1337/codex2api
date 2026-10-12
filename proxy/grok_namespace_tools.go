@@ -5,13 +5,14 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"io"
 	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
 
 // Grok（xAI）上游的 /responses 反序列化器只接受 function/web_search/x_search/… 等工具变体，

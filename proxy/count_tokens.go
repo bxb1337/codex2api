@@ -1,13 +1,13 @@
 package proxy
 
 import (
-	"encoding/json"
 	"math"
 	"net/http"
 	"unicode/utf8"
 
 	"github.com/codex2api/api"
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 )
 
 // 本地 token 计数兼容端点（issue #238）。

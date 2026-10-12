@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +24,7 @@ import (
 	"github.com/codex2api/internal/version"
 	"github.com/codex2api/proxy"
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 )
 
 const (

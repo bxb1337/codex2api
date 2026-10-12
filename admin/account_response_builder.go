@@ -1,7 +1,6 @@
 package admin
 
 import (
-	"encoding/json"
 	"strconv"
 	"strings"
 	"time"
@@ -9,6 +8,7 @@ import (
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/codex2api/internal/openaiidentity"
+	json "github.com/goccy/go-json"
 )
 
 func antigravityPersistedStatus(row *database.AccountRow) (string, string) {

@@ -1,12 +1,13 @@
 package proxy
 
 import (
-	"encoding/json"
 	"log"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
 
 type codexMetricDescriptor struct {

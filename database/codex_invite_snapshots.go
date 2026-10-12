@@ -3,12 +3,13 @@ package database
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
 
 // Codex 邀请快照的两种类型。资格与已发记录的变化速度不同，各自独立过期。

@@ -1,8 +1,9 @@
 package auth
 
 import (
-	"encoding/json"
 	"strings"
+
+	json "github.com/goccy/go-json"
 )
 
 // GrokFollowUpEffortConfig 是 Claude Code → Grok 续轮降思考的系统设置。

@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +14,7 @@ import (
 	"github.com/codex2api/internal/imagestore"
 	"github.com/codex2api/proxy"
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 )
 
 // GetExternalImageJobOutput streams Base64 without aggregating decoded images

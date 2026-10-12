@@ -1,11 +1,12 @@
 package auth
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 	"sync/atomic"
+
+	json "github.com/goccy/go-json"
 )
 
 // Antigravity 渠道级设置（system_settings.antigravity_config 列）。包含模型重定向

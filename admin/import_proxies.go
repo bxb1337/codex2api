@@ -2,13 +2,13 @@ package admin
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
 	"time"
 
 	"github.com/codex2api/security"
+	json "github.com/goccy/go-json"
 )
 
 // maxImportedProxies 限制单次导入能注册进代理池的代理条数。导入文件是外部输入，

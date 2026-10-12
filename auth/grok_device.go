@@ -2,13 +2,14 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
 
 // Grok Device Code 授权（RFC 8628），与官方 Grok CLI 一致。

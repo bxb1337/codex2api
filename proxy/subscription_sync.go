@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	json "github.com/goccy/go-json"
 )
 
 // 订阅到期时间同步：wham/usage 不返回订阅到期字段，JWT 里的

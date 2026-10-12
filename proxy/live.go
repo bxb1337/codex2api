@@ -8,7 +8,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +22,7 @@ import (
 	"github.com/codex2api/auth"
 	"github.com/codex2api/proxy/liveattestation"
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )

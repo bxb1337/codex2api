@@ -3,7 +3,6 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	json "github.com/goccy/go-json"
 	"github.com/google/uuid"
 )
 

@@ -3,11 +3,12 @@ package proxy
 import (
 	"archive/zip"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+
+	json "github.com/goccy/go-json"
 )
 
 type codexCLIManifest struct {

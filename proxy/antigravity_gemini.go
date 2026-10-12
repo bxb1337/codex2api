@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/codex2api/auth"
+	json "github.com/goccy/go-json"
 )
 
 // ExecuteAntigravityGeminiRequest forwards a native Gemini generateContent request

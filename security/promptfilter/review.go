@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +17,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	json "github.com/goccy/go-json"
 )
 
 const (

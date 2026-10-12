@@ -21,7 +21,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"net/url"
@@ -31,6 +30,7 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	json "github.com/goccy/go-json"
 )
 
 func defaultSessionPath() string {

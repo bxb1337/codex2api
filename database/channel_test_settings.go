@@ -3,9 +3,10 @@ package database
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"strings"
+
+	json "github.com/goccy/go-json"
 )
 
 // Claude / Antigravity 渠道各自的连通性测试配置（测试模型、测活内容），存放在

@@ -2,10 +2,11 @@ package database
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
 
 func (db *DB) InitImageMaintenance(ctx context.Context) error {

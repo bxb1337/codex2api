@@ -3,11 +3,12 @@ package database
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
 
 const QualityTestConcurrency = 3

@@ -2,13 +2,13 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log"
 	"sync"
 	"time"
 
 	"github.com/codex2api/cache"
+	json "github.com/goccy/go-json"
 )
 
 const (

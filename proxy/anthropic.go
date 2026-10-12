@@ -2,10 +2,10 @@ package proxy
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"strings"
 
+	json "github.com/goccy/go-json"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )

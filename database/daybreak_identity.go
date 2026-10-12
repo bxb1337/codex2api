@@ -3,11 +3,11 @@ package database
 import (
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/codex2api/internal/openaiidentity"
+	json "github.com/goccy/go-json"
 )
 
 type DaybreakPrincipal struct {

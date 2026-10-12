@@ -3,10 +3,11 @@ package database
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+
+	json "github.com/goccy/go-json"
 )
 
 // GetClaudeSyncedCLIVersion 读取后台同步到的 Claude Code CLI 版本（空=尚未同步）。

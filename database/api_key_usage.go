@@ -3,13 +3,14 @@ package database
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 	"sort"
 	"strings"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
 
 // APIKeyWindowUsage 表示一个 API Key 在某时间窗口内的累计使用量。

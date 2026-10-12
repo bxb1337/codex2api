@@ -1,12 +1,13 @@
 package auth
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
 	"unicode"
+
+	json "github.com/goccy/go-json"
 )
 
 // Antigravity OAuth client 的双来源配置：环境变量 ANTIGRAVITY_OAUTH_CLIENTS 与系统

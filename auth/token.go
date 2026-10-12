@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
 
 // OpenAI OAuth 常量（与 CLIProxyAPI / sub2api 一致）

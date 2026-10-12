@@ -3,13 +3,14 @@ package database
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"strings"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
 
 const (

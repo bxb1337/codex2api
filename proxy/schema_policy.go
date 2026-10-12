@@ -2,9 +2,9 @@ package proxy
 
 import (
 	"bytes"
-	"encoding/json"
 	"strings"
 
+	json "github.com/goccy/go-json"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

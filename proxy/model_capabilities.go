@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
+	json "github.com/goccy/go-json"
 	"github.com/tidwall/gjson"
 )
 

@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
+	json "github.com/goccy/go-json"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )

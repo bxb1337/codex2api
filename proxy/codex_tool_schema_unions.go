@@ -1,9 +1,10 @@
 package proxy
 
 import (
-	"encoding/json"
 	"math/big"
 	"strconv"
+
+	json "github.com/goccy/go-json"
 )
 
 // MCP 服务器常把枚举写成带说明的常量联合：

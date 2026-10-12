@@ -3,7 +3,6 @@ package admin
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 )
 
 // Called before accepting HTTP requests. Shutdown cancels work before closing stores.

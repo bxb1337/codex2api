@@ -2,7 +2,6 @@ package admin
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -13,6 +12,7 @@ import (
 	"github.com/codex2api/database"
 	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 )
 
 // isAgentIdentityCredentialRow 判断 DB 账号行是否为 Agent Identity 授权（供列表响应打标）。

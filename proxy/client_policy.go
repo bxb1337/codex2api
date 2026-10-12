@@ -1,10 +1,11 @@
 package proxy
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+
+	json "github.com/goccy/go-json"
 )
 
 type ClientPolicyEntry struct {

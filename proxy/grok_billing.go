@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	json "github.com/goccy/go-json"
 )
 
 // Grok billing 端点（cli-chat-proxy，与官方 Grok CLI 对齐）。

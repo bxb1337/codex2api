@@ -3,7 +3,6 @@ package database
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log"
 	"sort"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/codex2api/internal/openaiidentity"
+	json "github.com/goccy/go-json"
 )
 
 const (

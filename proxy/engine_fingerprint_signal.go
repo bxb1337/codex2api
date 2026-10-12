@@ -1,12 +1,12 @@
 package proxy
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
+	json "github.com/goccy/go-json"
 	"github.com/tidwall/gjson"
 )
 

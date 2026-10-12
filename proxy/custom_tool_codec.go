@@ -2,10 +2,10 @@ package proxy
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"strings"
 
+	json "github.com/goccy/go-json"
 	"github.com/tidwall/gjson"
 )
 

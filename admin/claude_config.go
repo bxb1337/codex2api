@@ -2,7 +2,6 @@ package admin
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
@@ -10,6 +9,7 @@ import (
 	"github.com/codex2api/auth"
 	"github.com/codex2api/proxy"
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 )
 
 // claudeGlobalConfigDTO 是 ClaudeCode 全局配置的读写载体(系统设置里的独立模块)。

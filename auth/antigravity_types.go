@@ -1,12 +1,13 @@
 package auth
 
 import (
-	"encoding/json"
 	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
 
 // UpstreamAntigravity marks Google Antigravity accounts. They participate in

@@ -1,10 +1,11 @@
 package database
 
 import (
-	"encoding/json"
 	"sort"
 	"strconv"
 	"strings"
+
+	json "github.com/goccy/go-json"
 )
 
 // ContinuousRetryPolicy controls the opt-in, request-scoped retry loop for

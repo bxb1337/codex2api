@@ -1,10 +1,10 @@
 package proxy
 
 import (
-	"encoding/json"
 	"strings"
 
 	"github.com/codex2api/auth"
+	json "github.com/goccy/go-json"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -10,6 +9,7 @@ import (
 	"unicode"
 
 	"github.com/codex2api/auth"
+	json "github.com/goccy/go-json"
 )
 
 // ==================== 动态 User-Agent 生成 ====================

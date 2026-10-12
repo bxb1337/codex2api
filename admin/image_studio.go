@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	_ "image/gif"
@@ -28,6 +27,7 @@ import (
 	"github.com/codex2api/proxy"
 	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )

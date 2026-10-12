@@ -4,12 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
 	"strings"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
 
 const (

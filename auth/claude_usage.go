@@ -2,13 +2,14 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
 
 // ClaudeOAuthUsageURL is the zero-spend usage endpoint used by Claude Code.

@@ -1,10 +1,11 @@
 package auth
 
 import (
-	"encoding/json"
 	"math"
 	"strconv"
 	"strings"
+
+	json "github.com/goccy/go-json"
 )
 
 // GrokPlan describes one Grok subscription tier. Key is the stable value stored

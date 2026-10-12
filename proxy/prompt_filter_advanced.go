@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +15,7 @@ import (
 	"github.com/codex2api/cache"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 	"github.com/google/uuid"
 )
 

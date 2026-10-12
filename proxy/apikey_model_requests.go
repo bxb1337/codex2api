@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -15,6 +14,7 @@ import (
 	"github.com/codex2api/api"
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 )
 
 type apiKeyModelRequestContextKey struct{}

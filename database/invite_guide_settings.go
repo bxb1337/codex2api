@@ -3,9 +3,10 @@ package database
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"strings"
+
+	json "github.com/goccy/go-json"
 )
 
 // 导入后的邀请引导配置存放在 system_settings.invite_guide_config。和

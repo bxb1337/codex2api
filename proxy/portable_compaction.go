@@ -3,11 +3,11 @@ package proxy
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/json"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/codex2api/security"
+	json "github.com/goccy/go-json"
 )
 
 const (

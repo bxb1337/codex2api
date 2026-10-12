@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
+	json "github.com/goccy/go-json"
 )
 
 const (

@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
@@ -10,6 +9,7 @@ import (
 	"time"
 
 	"github.com/codex2api/database"
+	json "github.com/goccy/go-json"
 )
 
 type CodexClientVersionPair struct {

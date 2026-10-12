@@ -2,12 +2,13 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 	"unicode"
+
+	json "github.com/goccy/go-json"
 )
 
 // NormalizeClaudeBaseURL accepts an API root or a root ending in /v1.

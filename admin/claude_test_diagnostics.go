@@ -2,7 +2,6 @@ package admin
 
 import (
 	"bytes"
-	"encoding/json"
 	"io"
 	"net/http"
 	"regexp"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/codex2api/security/promptfilter"
+	json "github.com/goccy/go-json"
 	"github.com/tidwall/gjson"
 )
 

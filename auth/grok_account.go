@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +18,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode"
+
+	json "github.com/goccy/go-json"
 )
 
 // UpstreamGrok 标记 Grok CLI 上游账号（upstream_type 凭据字段取值）。

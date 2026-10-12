@@ -3,9 +3,10 @@ package database
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
+
+	json "github.com/goccy/go-json"
 )
 
 // DaybreakSnapshot 独立保存完整权限目录，成功刷新时替换而非合并。

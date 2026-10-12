@@ -2,11 +2,11 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 )
 
 // ErrorCode represents a standardized API error code

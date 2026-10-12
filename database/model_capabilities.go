@@ -3,10 +3,11 @@ package database
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+
+	json "github.com/goccy/go-json"
 )
 
 // A snapshot belongs to one upstream credential generation, never to a global

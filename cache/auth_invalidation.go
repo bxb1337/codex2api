@@ -2,9 +2,10 @@ package cache
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
 
 // AuthInvalidationBus is an optional latency optimization. Consumers must keep

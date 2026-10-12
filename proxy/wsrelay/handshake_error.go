@@ -2,13 +2,14 @@ package wsrelay
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"unicode/utf8"
+
+	json "github.com/goccy/go-json"
 )
 
 const handshakeErrorBodyLimit = 4 << 10 // 4 KiB

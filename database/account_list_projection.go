@@ -3,9 +3,10 @@ package database
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"strings"
+
+	json "github.com/goccy/go-json"
 )
 
 // ListAccountListProjection returns only non-secret fields needed to build the

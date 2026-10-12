@@ -1,9 +1,10 @@
 package imagestore
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
+
+	json "github.com/goccy/go-json"
 )
 
 // ConfigJSON 是持久化在 system_settings.image_storage_config 中的 JSON shape。

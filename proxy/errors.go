@@ -1,13 +1,13 @@
 package proxy
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 )
 
 // ==================== Error Type Constants ====================

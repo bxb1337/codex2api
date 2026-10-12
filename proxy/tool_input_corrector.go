@@ -1,9 +1,10 @@
 package proxy
 
 import (
-	"encoding/json"
 	"strings"
 	"sync"
+
+	json "github.com/goccy/go-json"
 )
 
 // ToolInputCorrectionStats records automatic tool input corrections.

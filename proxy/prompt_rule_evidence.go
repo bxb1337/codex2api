@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"encoding/json"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -9,6 +8,7 @@ import (
 	"github.com/codex2api/database"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 	"github.com/google/uuid"
 )
 

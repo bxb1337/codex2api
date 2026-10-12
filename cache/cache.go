@@ -2,8 +2,9 @@ package cache
 
 import (
 	"context"
-	"encoding/json"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
 
 // PoolStats 统一的缓存连接池状态表示。

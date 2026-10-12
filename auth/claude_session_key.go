@@ -15,12 +15,13 @@ package auth
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+
+	json "github.com/goccy/go-json"
 )
 
 const (

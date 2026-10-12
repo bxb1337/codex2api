@@ -1,10 +1,11 @@
 package auth
 
 import (
-	"encoding/json"
 	"math"
 	"strings"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
 
 // 调度模式（remaining_quota / fill_first / round_robin 的 healthy 桶）的排序键是

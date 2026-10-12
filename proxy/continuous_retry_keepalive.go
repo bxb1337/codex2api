@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 )
 
 const continuousRetryKeepaliveComment = downstreamSSEKeepaliveComment

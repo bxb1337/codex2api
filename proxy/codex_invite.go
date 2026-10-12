@@ -3,7 +3,6 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/codex2api/auth"
+	json "github.com/goccy/go-json"
 )
 
 // 推荐邀请端点。上游已把 wham/ 前缀下的旧路径下线（GET 返回 404 Not Found），

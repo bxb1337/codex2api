@@ -2,12 +2,12 @@ package cache
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
 	"time"
 
+	json "github.com/goccy/go-json"
 	"github.com/redis/go-redis/v9"
 )
 

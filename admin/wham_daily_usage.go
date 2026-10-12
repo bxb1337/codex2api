@@ -2,7 +2,6 @@ package admin
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +14,7 @@ import (
 	"github.com/codex2api/database"
 	"github.com/codex2api/proxy"
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 )
 
 // whamDailyUsageDefaultDays 是弹窗默认展示的天数。上游可回溯约 84 天，本地库累积后

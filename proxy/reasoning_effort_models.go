@@ -1,12 +1,12 @@
 package proxy
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
 
 	"github.com/codex2api/security"
+	json "github.com/goccy/go-json"
 )
 
 type ReasoningEffortModel struct {

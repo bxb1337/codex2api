@@ -3,12 +3,12 @@ package proxy
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
 	"strings"
 
+	json "github.com/goccy/go-json"
 	"github.com/tidwall/gjson"
 )
 

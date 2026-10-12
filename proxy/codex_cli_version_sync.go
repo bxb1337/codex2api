@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/codex2api/database"
+	json "github.com/goccy/go-json"
 )
 
 // CodexReleasesLatestURL 是 openai/codex 官方最新稳定 release 的 GitHub API 端点。

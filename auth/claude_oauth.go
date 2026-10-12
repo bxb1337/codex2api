@@ -23,7 +23,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,6 +31,7 @@ import (
 	"time"
 
 	"github.com/andybalholm/brotli"
+	json "github.com/goccy/go-json"
 )
 
 // Claude OAuth 配置常量。对齐 Claude Code 官方客户端在链路上的取值。

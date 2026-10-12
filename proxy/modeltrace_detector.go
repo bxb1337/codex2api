@@ -10,7 +10,6 @@ import (
 	"crypto/rand"
 	_ "embed"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -23,6 +22,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode"
+
+	json "github.com/goccy/go-json"
 )
 
 const (

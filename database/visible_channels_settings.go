@@ -3,9 +3,10 @@ package database
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"strings"
+
+	json "github.com/goccy/go-json"
 )
 
 // 仪表盘与账号管理里显示哪些上游渠道，存放在 system_settings.visible_channels_config。

@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
+	json "github.com/goccy/go-json"
 	"golang.org/x/sync/singleflight"
 )
 

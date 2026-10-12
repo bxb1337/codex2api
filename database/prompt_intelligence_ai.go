@@ -3,9 +3,10 @@ package database
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"strings"
+
+	json "github.com/goccy/go-json"
 )
 
 const (

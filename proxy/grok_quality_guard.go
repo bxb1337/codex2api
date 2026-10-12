@@ -3,7 +3,6 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
+	json "github.com/goccy/go-json"
 
 	"github.com/gin-gonic/gin"
 )

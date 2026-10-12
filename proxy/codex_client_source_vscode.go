@@ -3,10 +3,11 @@ package proxy
 import (
 	"archive/zip"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+
+	json "github.com/goccy/go-json"
 )
 
 // 65554 = 最新稳定版和预览版 + 文件 + 属性；避免拉取整个历史版本清单。

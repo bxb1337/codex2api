@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/codex2api/security"
+	json "github.com/goccy/go-json"
 )
 
 // fileLogger 单个日志文件实例

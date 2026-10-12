@@ -1,9 +1,10 @@
 package auth
 
 import (
-	"encoding/json"
 	"strings"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
 
 // Claude Code 出站请求的指纹收敛模式(账号级;空值 = 跟随全局默认):

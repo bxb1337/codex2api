@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/codex2api/auth"
+	json "github.com/goccy/go-json"
 )
 
 // WhamDailyTokenBreakdownURL 是 ChatGPT 后端按天、按模型×速度拆分用量的端点。
