@@ -166,7 +166,11 @@ func readRequestMemoryBounded(reader io.Reader, maxSize int64, reservation *Requ
 	if reservation != nil {
 		reader = &requestMemoryReader{reader: reader, reservation: reservation, prepaid: prepaid}
 	}
-	return io.ReadAll(io.LimitReader(reader, maxSize+1))
+	reader = io.LimitReader(reader, maxSize+1)
+	if prepaid <= 0 || prepaid > maxSize {
+		return io.ReadAll(reader)
+	}
+	return readRequestMemoryKnownLength(reader, prepaid)
 }
 
 // ReadRequestMemory charges fragmented/unknown-length WS input as it arrives.
