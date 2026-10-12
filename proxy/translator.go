@@ -1,9 +1,6 @@
 package proxy
 
 import (
-	"container/list"
-	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -11,9 +8,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/codex2api/internal/jsonbody"
+	json "github.com/goccy/go-json"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -185,10 +183,6 @@ type openAIErrorResponse struct {
 	} `json:"error"`
 }
 
-// ==================== LRU 请求解析缓存 ====================
-
-const requestCacheSize = 256
-
 // maxTools 上游 Codex API 允许的最大工具数量
 const maxTools = 128
 
@@ -210,22 +204,6 @@ var responsesImageGenerationOptionFields = []string{
 
 var responsesImageGenerationUnsupportedOptionFields = []string{
 	"style",
-}
-
-type requestCacheEntry struct {
-	key [32]byte
-	req openAIRequest
-}
-
-type requestCache struct {
-	mu    sync.Mutex
-	order *list.List
-	items map[[32]byte]*list.Element
-}
-
-var globalRequestCache = &requestCache{
-	order: list.New(),
-	items: make(map[[32]byte]*list.Element, requestCacheSize),
 }
 
 func firstNonEmptyAnyString(raw any) string {
@@ -1532,6 +1510,11 @@ func responsesInputRaw(body []byte) string {
 	return input.Raw
 }
 
+// responsesInputView 是已准备正文的只读快照；后续正文改写必须生成新缓冲。
+func responsesInputView(body []byte) []byte {
+	return jsonbody.New(body).RawBytes("input")
+}
+
 func dropBareReasoningInputItems(body map[string]any) bool {
 	input, ok := body["input"]
 	if !ok {
@@ -1680,71 +1663,30 @@ func truncateToolsPreservingImageGeneration(tools []any) []any {
 	return truncated
 }
 
-func (c *requestCache) get(key [32]byte) (openAIRequest, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	elem, ok := c.items[key]
-	if !ok {
-		return openAIRequest{}, false
-	}
-	c.order.MoveToFront(elem)
-	return elem.Value.(*requestCacheEntry).req, true
-}
-
-func (c *requestCache) put(key [32]byte, req openAIRequest) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if elem, ok := c.items[key]; ok {
-		c.order.MoveToFront(elem)
-		elem.Value.(*requestCacheEntry).req = req
-		return
-	}
-	elem := c.order.PushFront(&requestCacheEntry{key: key, req: req})
-	c.items[key] = elem
-	if c.order.Len() <= requestCacheSize {
-		return
-	}
-	tail := c.order.Back()
-	if tail == nil {
-		return
-	}
-	c.order.Remove(tail)
-	delete(c.items, tail.Value.(*requestCacheEntry).key)
-}
-
-// cachedOrParse 从缓存获取或解析请求，返回结构体（Unmarshal 至多一次）
-func cachedOrParse(rawJSON []byte) openAIRequest {
-	if len(rawJSON) == 0 {
-		return openAIRequest{}
-	}
-	key := sha256.Sum256(rawJSON)
-	if req, ok := globalRequestCache.get(key); ok {
-		return req
-	}
-	var req openAIRequest
-	_ = json.Unmarshal(rawJSON, &req)
-	globalRequestCache.put(key, req)
-	return req
-}
-
 // ==================== 请求翻译: OpenAI Chat Completions → Codex Responses ====================
 
 // TranslateRequest 将 OpenAI Chat Completions 请求转换为 Codex Responses 格式
 // 采用 Unmarshal→构造 map→Marshal 模式，只做一次 JSON 序列化
 func TranslateRequest(rawJSON []byte) ([]byte, error) {
+	body, _, err := translateChatRequestWithRestore(rawJSON)
+	return body, err
+}
+
+// 一次解析同时生成请求体和还原映射，避免大请求被淘汰后再次解析。
+func translateChatRequestWithRestore(rawJSON []byte) ([]byte, map[string]string, error) {
 	parsed := cachedOrParse(rawJSON)
 	req := sanitizeChatCompletionToolHistory(parsed)
 	if err := validateChatCompletionFunctionNames(req); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	out := buildChatResponsesRequest(req)
 	if access := gjson.GetBytes(rawJSON, "access_programs"); access.Exists() {
 		out["access_programs"] = json.RawMessage(access.Raw)
 	}
-	// 工具名净化映射从净化历史前的解析结果推导，与响应侧 ChatToolNameRestoreMap
-	// 使用同一份输入，保证去重后缀两边一致。
-	applyCodexToolNameMap(out, buildCodexToolNameMap(collectChatToolNames(parsed)))
-	return json.Marshal(out)
+	nameMap := buildCodexToolNameMap(collectChatToolNames(parsed))
+	applyCodexToolNameMap(out, nameMap)
+	body, err := json.Marshal(out)
+	return body, restoreMapForCodexToolNames(nameMap), err
 }
 
 // TranslateChatToResponsesForGrok converts a Chat Completions request into a
@@ -2092,7 +2034,8 @@ func ValidateResponsesFunctionNames(rawBody []byte) error {
 	// 无效 JSON 时 gjson 查询返回空结果、校验直接通过（与旧版 Unmarshal 失败即
 	// 放行一致），无需先做一次全量 ValidBytes 扫描。
 	var funcErr error
-	gjson.GetBytes(rawBody, "input").ForEach(func(idx, item gjson.Result) bool {
+	document := gjson.Parse(jsonbody.ReadOnlyText(rawBody))
+	document.Get("input").ForEach(func(idx, item gjson.Result) bool {
 		if strings.TrimSpace(item.Get("type").String()) != "function_call" {
 			return true
 		}
@@ -2106,7 +2049,7 @@ func ValidateResponsesFunctionNames(rawBody []byte) error {
 		return funcErr
 	}
 
-	gjson.GetBytes(rawBody, "tools").ForEach(func(idx, tool gjson.Result) bool {
+	document.Get("tools").ForEach(func(idx, tool gjson.Result) bool {
 		if strings.TrimSpace(tool.Get("type").String()) != "function" {
 			return true
 		}
@@ -2264,6 +2207,7 @@ type responsesBodyPrepareOptions struct {
 	preservePreviousResponseID   bool
 	deferStructuredStringLengths bool
 	skipExpandedInput            bool
+	expandedInputView            *[]byte
 	naturalImageIntent           *bool
 	cachedResponseItems          []json.RawMessage
 	// cacheOwner 是 previous_response_id 展开时使用的缓存归属命名空间
@@ -2282,12 +2226,12 @@ func PrepareResponsesBody(rawBody []byte) ([]byte, string) {
 // 展开限定在 owner 的缓存命名空间内（owner 见 responseCacheOwner）。
 func PrepareResponsesBodyForOwner(rawBody []byte, owner string) ([]byte, string) {
 	prepared := prepareResponsesBodyForOwnerDetailed(rawBody, owner)
-	return prepared.Body, prepared.ExpandedInputRaw
+	return prepared.Body, string(prepared.ExpandedInput)
 }
 
 type responsesBodyPreparation struct {
 	Body                 []byte
-	ExpandedInputRaw     string
+	ExpandedInput        []byte
 	PreviousResponseID   string
 	CacheLookup          responseCacheLookupResult
 	RequiresLocalContext bool
@@ -2306,14 +2250,15 @@ func prepareResponsesBodyForOwnerDetailed(rawBody []byte, owner string) response
 			preparation.CacheLookup = getResponseCacheForReplay(owner, prevID)
 		}
 	}
-	preparedBody, expandedInputRaw := prepareResponsesBodyWithOptions(rawBody, responsesBodyPrepareOptions{
+	preparedBody, _ := prepareResponsesBodyWithOptions(rawBody, responsesBodyPrepareOptions{
 		forceStoreFalse:        true,
+		skipExpandedInput:      true,
+		expandedInputView:      &preparation.ExpandedInput,
 		expandPreviousResponse: false,
 		cacheOwner:             owner,
 		cachedResponseItems:    preparation.CacheLookup.Items,
 	})
 	preparation.Body = preparedBody
-	preparation.ExpandedInputRaw = expandedInputRaw
 	return preparation
 }
 
@@ -2386,6 +2331,7 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 	if err := json.Unmarshal(rawBody, &body); err != nil {
 		return rawBody, ""
 	}
+	bodySnapshot := jsonbody.Capture(rawBody, body)
 	if opts.naturalImageIntent != nil {
 		// Inspect the original prompt before compatibility rewrites or automatic
 		// image-tool injection. Reuse this parse when selecting the transport.
@@ -2538,7 +2484,7 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 		delete(body, "previous_response_id")
 	}
 
-	result, err := json.Marshal(body)
+	result, err := bodySnapshot.Marshal(body)
 	if err != nil {
 		if opts.skipExpandedInput {
 			return rawBody, ""
@@ -2552,6 +2498,9 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 		return rawBody, expandedInputRaw
 	}
 	result = normalizeCompactionTriggerFinal(result, false)
+	if opts.expandedInputView != nil {
+		*opts.expandedInputView = responsesInputView(result)
+	}
 	if opts.skipExpandedInput {
 		return result, ""
 	}
@@ -2567,6 +2516,7 @@ func PrepareOpenAIResponsesBody(rawBody []byte) []byte {
 	if err := json.Unmarshal(rawBody, &body); err != nil {
 		return rawBody
 	}
+	bodySnapshot := jsonbody.Capture(rawBody, body)
 
 	effortModel := firstNonEmptyAnyString(body["model"])
 	if re, ok := body["reasoning_effort"].(string); ok {
@@ -2602,7 +2552,7 @@ func PrepareOpenAIResponsesBody(rawBody []byte) []byte {
 	moveTopLevelResponsesImageOptions(body)
 	normalizeResponsesImageGenerationTools(body, extractResponsesPromptText(body))
 
-	result, err := json.Marshal(body)
+	result, err := bodySnapshot.Marshal(body)
 	if err != nil {
 		return rawBody
 	}
@@ -2620,18 +2570,19 @@ func PrepareCompactResponsesBody(rawBody []byte) ([]byte, string) {
 // previous_response_id 展开限定在 owner 的缓存命名空间内。
 func PrepareCompactResponsesBodyForOwner(rawBody []byte, owner string) ([]byte, string) {
 	prepared := prepareCompactResponsesBodyForOwnerDetailed(rawBody, owner)
-	return prepared.Body, prepared.ExpandedInputRaw
+	return prepared.Body, string(prepared.ExpandedInput)
 }
 
 func prepareCompactResponsesBodyForOwnerDetailed(rawBody []byte, owner string) responsesBodyPreparation {
 	prepared := prepareResponsesBodyForOwnerDetailed(rawBody, owner)
-	prepared.Body, _ = sjson.DeleteBytes(prepared.Body, "include")
-	prepared.Body, _ = sjson.DeleteBytes(prepared.Body, "store")
-	prepared.Body, _ = sjson.DeleteBytes(prepared.Body, "stream")
-	// 普通 /responses 请求携带的客户端指纹元数据,compact 端点不认识该参数
-	// (Unknown parameter: 'client_metadata')——body-signal 压缩提升会把普通
-	// 请求形状的 body 送进本函数,须在此剥除。
-	prepared.Body, _ = sjson.DeleteBytes(prepared.Body, "client_metadata")
+	editor := jsonbody.New(prepared.Body)
+	for _, field := range []string{"include", "store", "stream", "client_metadata"} {
+		editor.Delete(field)
+	}
+	prepared.Body = editor.Bytes()
+	if len(prepared.ExpandedInput) > 0 {
+		prepared.ExpandedInput = responsesInputView(prepared.Body)
+	}
 	return prepared
 }
 
@@ -3042,23 +2993,26 @@ func normalizeServiceTierField(body []byte) []byte {
 }
 
 func sanitizeServiceTierForUpstream(body []byte) []byte {
-	tier := strings.TrimSpace(gjson.GetBytes(body, "service_tier").String())
+	value := gjson.GetBytes(body, "service_tier")
+	tier := strings.TrimSpace(value.String())
 	if tier == "" {
-		body, _ = sjson.DeleteBytes(body, "serviceTier")
+		body = deleteJSONFieldIfPresent(body, "serviceTier")
 		return body
 	}
 	switch tier {
 	case "auto", "default", "flex", "priority", "scale", "fast", "ultrafast":
-		body, _ = sjson.DeleteBytes(body, "serviceTier")
+		body = deleteJSONFieldIfPresent(body, "serviceTier")
 		if upstreamTier, ok := upstreamServiceTier(tier); ok {
-			body, _ = sjson.SetBytes(body, "service_tier", upstreamTier)
+			if value.Raw != `"`+upstreamTier+`"` {
+				body, _ = sjson.SetBytes(body, "service_tier", upstreamTier)
+			}
 		} else {
 			body, _ = sjson.DeleteBytes(body, "service_tier")
 		}
 		return body
 	default:
 		body, _ = sjson.DeleteBytes(body, "service_tier")
-		body, _ = sjson.DeleteBytes(body, "serviceTier")
+		body = deleteJSONFieldIfPresent(body, "serviceTier")
 		return body
 	}
 }

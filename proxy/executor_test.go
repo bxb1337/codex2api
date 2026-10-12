@@ -563,7 +563,7 @@ func TestPrepareCodexResponsesLiteTransportBridgesRequestScopedSignal(t *testing
 	headers := make(http.Header)
 	headers.Set(codexResponsesLiteHeader, "true")
 
-	wsBody, wsHeaders := prepareCodexResponsesLiteTransport(body, headers, true, true)
+	wsBody, wsHeaders := prepareCodexResponsesLiteTransport(body, responsesLiteTransport{headers: headers, websocket: true, enabled: true})
 	if got := gjson.GetBytes(wsBody, codexResponsesLiteWSMetadataPath).String(); got != "true" {
 		t.Fatalf("WS Lite metadata = %q, want true; body=%s", got, wsBody)
 	}
@@ -571,7 +571,7 @@ func TestPrepareCodexResponsesLiteTransportBridgesRequestScopedSignal(t *testing
 		t.Fatalf("WS handshake Lite header = %q, want empty", got)
 	}
 
-	httpBody, httpHeaders := prepareCodexResponsesLiteTransport(body, headers, false, true)
+	httpBody, httpHeaders := prepareCodexResponsesLiteTransport(body, responsesLiteTransport{headers: headers, websocket: false, enabled: true})
 	if got := httpHeaders.Get(codexResponsesLiteHeader); got != "true" {
 		t.Fatalf("HTTP Lite header = %q, want true", got)
 	}
@@ -588,7 +588,7 @@ func TestPrepareCodexResponsesLiteTransportBridgesRequestScopedSignal(t *testing
 		t.Fatalf("caller headers were mutated: Lite header = %q", got)
 	}
 
-	nextWSBody, nextWSHeaders := prepareCodexResponsesLiteTransport([]byte(`{"model":"gpt-5.6-sol"}`), nil, true, false)
+	nextWSBody, nextWSHeaders := prepareCodexResponsesLiteTransport([]byte(`{"model":"gpt-5.6-sol"}`), responsesLiteTransport{headers: nil, websocket: true, enabled: false})
 	if marker := gjson.GetBytes(nextWSBody, codexResponsesLiteWSMetadataPath); marker.Exists() {
 		t.Fatalf("non-Lite request inherited pooled WS metadata: %s", nextWSBody)
 	}
@@ -599,7 +599,7 @@ func TestPrepareCodexResponsesLiteTransportBridgesRequestScopedSignal(t *testing
 	nonLiteHeaders := make(http.Header)
 	nonLiteHeaders.Set(codexResponsesLiteHeader, "false")
 	nonLiteBody := []byte(`{"model":"gpt-5.6-sol","client_metadata":{"other":"kept","ws_request_header_x_openai_internal_codex_responses_lite":"false"}}`)
-	nonLiteBody, nonLiteHeaders = prepareCodexResponsesLiteTransport(nonLiteBody, nonLiteHeaders, false, false)
+	nonLiteBody, nonLiteHeaders = prepareCodexResponsesLiteTransport(nonLiteBody, responsesLiteTransport{headers: nonLiteHeaders, websocket: false, enabled: false})
 	if got := nonLiteHeaders.Get(codexResponsesLiteHeader); got != "" {
 		t.Fatalf("false Lite header was forwarded as %q", got)
 	}
@@ -612,7 +612,7 @@ func TestPrepareCodexResponsesLiteTransportBridgesRequestScopedSignal(t *testing
 	gatedWSBody := []byte(`{"model":"gpt-5.5","client_metadata":{"other":"kept","ws_request_header_x_openai_internal_codex_responses_lite":"true"}}`)
 	gatedWSHeaders := make(http.Header)
 	gatedWSHeaders.Set(codexResponsesLiteHeader, "true")
-	gatedWSBody, gatedWSHeaders = prepareCodexResponsesLiteTransport(gatedWSBody, gatedWSHeaders, true, false)
+	gatedWSBody, gatedWSHeaders = prepareCodexResponsesLiteTransport(gatedWSBody, responsesLiteTransport{headers: gatedWSHeaders, websocket: true, enabled: false})
 	if marker := gjson.GetBytes(gatedWSBody, codexResponsesLiteWSMetadataPath); marker.Exists() {
 		t.Fatalf("WS body retained Lite metadata after gate disabled it: %s", gatedWSBody)
 	}

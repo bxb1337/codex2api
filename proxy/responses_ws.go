@@ -3,7 +3,6 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +18,7 @@ import (
 	"github.com/codex2api/security"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 	"github.com/gorilla/websocket"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -397,7 +397,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	validator := api.NewValidator(rawBody)
 	rules := api.ResponsesAPIValidationRulesForModel(model)
 	rules["model"] = append(rules["model"], api.ModelValidator(supportedModels))
-	if result := validator.ValidateRequest(rules); !result.Valid {
+	if result := validator.ValidateRequestReadOnly(rules); !result.Valid {
 		apiErr = validator.ToAPIError()
 		_ = writeResponsesWSError(conn, apiErr)
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, apiErr)
@@ -1225,6 +1225,8 @@ func (h *Handler) streamResponsesWSUpstream(
 			}
 			wroteAnyBody = wroteAnyBody || wrotePending
 		}
+		// 已下发的首包不再由容量槽位持有到整条流结束。
+		clear(pendingFirstTokenMessages)
 		pendingFirstTokenMessages = pendingFirstTokenMessages[:0]
 		pendingFirstTokenBytes = 0
 		return true
@@ -1343,6 +1345,7 @@ func (h *Handler) streamResponsesWSUpstream(
 				// 让外层循环透明换到健康账号重试，避免客户端反复 Reconnecting。
 				// 已经向客户端写过内容（wroteAnyBody / 已记录首 token）则照常透传。
 				if (retryEnabled || hideUpstreamErrors) && eventType == "response.failed" && !contentTokenSeen && !wroteAnyBody && continuousRetryStreamFailureSelected(classifyResponseFailedOutcome(terminalFailurePayload), terminalFailurePayload, eventType, continuousRetryPolicy) {
+					clear(pendingFirstTokenMessages)
 					pendingFirstTokenMessages = pendingFirstTokenMessages[:0]
 					pendingFirstTokenBytes = 0
 					return false
@@ -1352,6 +1355,7 @@ func (h *Handler) streamResponsesWSUpstream(
 				// 写出也不算内容，不能挡住降级——真实 ChatGPT WS 几乎总会先推这两帧。
 				if allowContinuationDegrade && eventType == "response.failed" && !contentTokenSeen &&
 					isPreviousResponseNotFoundBody(terminalFailurePayload) {
+					clear(pendingFirstTokenMessages)
 					pendingFirstTokenMessages = pendingFirstTokenMessages[:0]
 					pendingFirstTokenBytes = 0
 					continuationNotFound = true
@@ -1364,6 +1368,7 @@ func (h *Handler) streamResponsesWSUpstream(
 				// 关闭时按既有约定原样透传失败帧。
 				if shouldReturnHTTPErrorForResponseFailed(eventType, contentTokenSeen, wroteAnyBody, clientGone) &&
 					!continuousRetryStreamFailureSelected(classifyResponseFailedOutcome(terminalFailurePayload), terminalFailurePayload, eventType, continuousRetryPolicy) {
+					clear(pendingFirstTokenMessages)
 					pendingFirstTokenMessages = pendingFirstTokenMessages[:0]
 					pendingFirstTokenBytes = 0
 					abortedForErrorClose = true

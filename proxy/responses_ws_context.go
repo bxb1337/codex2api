@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -10,6 +9,8 @@ import (
 	"time"
 
 	"github.com/codex2api/api"
+	"github.com/codex2api/internal/jsonbody"
+	json "github.com/goccy/go-json"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -47,7 +48,7 @@ func responsesWSReplayInputChecked(body []byte, options responsesWSReplayOptions
 		}
 		items = append(items, lookup.Items...)
 	}
-	input, itemErr := responsesWSReplayItems(gjson.GetBytes(body, "input"), options)
+	input, itemErr := responsesWSReplayItems(gjson.Get(jsonbody.ReadOnlyText(body), "input"), options)
 	if itemErr != nil {
 		return "", itemErr
 	}
@@ -90,7 +91,7 @@ func responsesWSReplayItems(current gjson.Result, options responsesWSReplayOptio
 func validateResponsesWSReplayItems(items []json.RawMessage, options responsesWSReplayOptions) ([]json.RawMessage, *api.APIError) {
 	for index, item := range items {
 		if strings.HasPrefix(options.owner, nativeWSCachePrefix) {
-			raw, err := nativeWSReplayItemChecked(gjson.ParseBytes(item), options.allowOpaque)
+			raw, err := nativeWSReplayItemChecked(gjson.Parse(jsonbody.ReadOnlyText(item)), options.allowOpaque)
 			if err != nil {
 				return nil, err
 			}
@@ -111,7 +112,8 @@ func responsesWSContextUnavailable(status int, reason string) *api.APIError {
 }
 
 func responsesWSContextItemKey(raw json.RawMessage) string {
-	item := gjson.ParseBytes(raw)
+	// 只借用正文读取标识；返回的拼接键独立于缓存项的底层缓冲。
+	item := gjson.Parse(jsonbody.ReadOnlyText(raw))
 	callType, call, output := responseContextPairType(item.Get("type").String())
 	if id := item.Get("call_id").String(); id != "" && (call || output) {
 		if output {
@@ -162,7 +164,7 @@ func cacheResponsesWSCompletedResponse(owner, input string, completed []byte, ou
 	if json.Unmarshal([]byte(sanitizeResponseCacheInput([]byte(input))), &items) != nil {
 		return
 	}
-	terminal := gjson.GetBytes(completed, "response.output")
+	terminal := gjson.Get(jsonbody.ReadOnlyText(completed), "response.output")
 	if len(terminal.Array()) > len(outputItems) {
 		outputItems = nil
 		terminal.ForEach(func(_, item gjson.Result) bool {
@@ -172,7 +174,7 @@ func cacheResponsesWSCompletedResponse(owner, input string, completed []byte, ou
 	}
 	var output []json.RawMessage
 	for _, raw := range outputItems {
-		item := gjson.ParseBytes(raw)
+		item := gjson.Parse(jsonbody.ReadOnlyText(raw))
 		if item.Get("type").String() == "message" {
 			if replayable, ok := stripResponseItemID(raw); ok {
 				output = append(output, replayable)

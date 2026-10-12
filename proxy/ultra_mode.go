@@ -11,6 +11,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/codex2api/database"
+	"github.com/codex2api/internal/jsonbody"
 )
 
 // Codex 客户端的 "Ultra" 档不是线路上的 reasoning.effort 取值:客户端把它翻成
@@ -44,7 +45,7 @@ func detectUltraModeFromBody(body []byte) ultraModeState {
 	if len(body) == 0 || !bytes.Contains(body, []byte("multi_agent_mode")) {
 		return ultraModeUnknown
 	}
-	input := gjson.GetBytes(body, "input")
+	input := gjson.Get(jsonbody.ReadOnlyText(body), "input")
 	if !input.IsArray() {
 		return ultraModeUnknown
 	}

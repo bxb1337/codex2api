@@ -3,7 +3,6 @@ package wsrelay
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,7 +14,9 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/internal/jsonbody"
 	"github.com/codex2api/proxy"
+	json "github.com/goccy/go-json"
 	"github.com/gorilla/websocket"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -313,35 +314,23 @@ func (e *Executor) prepareWebsocketBody(body []byte, sessionID string) []byte {
 		return nil
 	}
 
-	// 克隆并修改请求体
-	wsBody := bytes.Clone(body)
-
-	// 1. 确保 instructions 字段存在
-	if !gjson.GetBytes(wsBody, "instructions").Exists() {
-		wsBody, _ = sjson.SetBytes(wsBody, "instructions", "")
+	editor := jsonbody.New(body)
+	if !editor.Get("instructions").Exists() {
+		editor.Set("instructions", "")
 	}
-
-	// 2. 清理多余字段（prompt_cache_retention 上游不接受，会返回 400 Unsupported parameter，必须删除）
-	wsBody, _ = sjson.DeleteBytes(wsBody, "prompt_cache_retention")
-	wsBody, _ = sjson.DeleteBytes(wsBody, "safety_identifier")
-	wsBody, _ = sjson.DeleteBytes(wsBody, "disable_response_storage")
-
-	// 3. 注入 prompt_cache_key
-	// stateless sessionID 只是连接池隔离用的一次性随机 ID，注入它会让上游
-	// prompt cache 每次请求都 miss；此时保留请求体中已有的确定性 cache key
-	//（由 proxy.ExecuteRequest 注入或客户端自带）。
-	existingCacheKey := strings.TrimSpace(gjson.GetBytes(wsBody, "prompt_cache_key").String())
+	for _, field := range []string{"prompt_cache_retention", "safety_identifier", "disable_response_storage"} {
+		editor.Delete(field)
+	}
+	// 一次性连接 ID 不参与缓存键，保留客户端已有的确定性键。
+	existingCacheKey := strings.TrimSpace(editor.Get("prompt_cache_key").String())
 	if sessionID != "" && !proxy.IsStatelessWebsocketSessionID(sessionID) {
-		wsBody, _ = sjson.SetBytes(wsBody, "prompt_cache_key", sessionID)
+		editor.Set("prompt_cache_key", sessionID)
 	} else if existingCacheKey != "" {
-		wsBody, _ = sjson.SetBytes(wsBody, "prompt_cache_key", existingCacheKey)
+		editor.Set("prompt_cache_key", existingCacheKey)
 	}
-
-	// 4. 设置请求类型和 stream
-	wsBody, _ = sjson.SetBytes(wsBody, "type", "response.create")
-	wsBody, _ = sjson.SetBytes(wsBody, "stream", true)
-
-	return wsBody
+	editor.Set("type", "response.create")
+	editor.Set("stream", true)
+	return editor.Bytes()
 }
 
 // reusablePoolBaseKeyWithModel isolates reusable WS slots by the model string used

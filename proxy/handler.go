@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -27,8 +26,10 @@ import (
 	"github.com/codex2api/cache"
 	"github.com/codex2api/config"
 	"github.com/codex2api/database"
+	"github.com/codex2api/internal/jsonbody"
 	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -1744,15 +1745,7 @@ func rawRequestBodyFromContext(c *gin.Context) ([]byte, bool) {
 }
 
 func readRawRequestBody(c *gin.Context) ([]byte, error) {
-	if body, ok := rawRequestBodyFromContext(c); ok {
-		return body, nil
-	}
-	body, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		return nil, err
-	}
-	setRawRequestBody(c, body)
-	return body, nil
+	return readRawRequestBodyUsing(c, c.Request.Body)
 }
 
 const ingressRequestBodyContextKey = "ingress_raw_body"
@@ -1834,7 +1827,8 @@ func requestCompactionMetaForHTTP(c *gin.Context, body []byte) requestCompaction
 // content, tool output, or arbitrary stringified JSON.
 func requestBodyCompactionMeta(body []byte) requestCompactionMeta {
 	meta := requestCompactionMeta{}
-	input := gjson.GetBytes(body, "input")
+	document := gjson.Parse(jsonbody.ReadOnlyText(body))
+	input := document.Get("input")
 	inspect := func(item gjson.Result) {
 		switch {
 		case gjsonResultIsCompactionTrigger(item):
@@ -1855,7 +1849,7 @@ func requestBodyCompactionMeta(body []byte) requestCompactionMeta {
 	}
 
 	meta.UsageTriggered = meta.ProtocolTriggered
-	clientMetadata := gjson.GetBytes(body, "client_metadata")
+	clientMetadata := document.Get("client_metadata")
 	if clientMetadata.IsObject() {
 		turnMetadata := clientMetadata.Get("x-codex-turn-metadata")
 		if turnMetadata.Type == gjson.String && turnMetadataIndicatesCompaction(turnMetadata.String()) {
@@ -3894,7 +3888,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	default:
 		rules["model"] = append(rules["model"], h.modelValidator(supportedModels))
 	}
-	result := validator.ValidateRequest(rules)
+	result := validator.ValidateRequestReadOnly(rules)
 	if !result.Valid {
 		api.SendError(c, validator.ToAPIError())
 		return
@@ -3958,7 +3952,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	// previous_response_id 缓存按下游 API Key 隔离，防止跨用户注入他人对话历史。
 	respCacheOwner := responseCacheOwner(apiKeyID)
 	bodyPreparation := prepareResponsesBodyForOwnerDetailed(rawBody, respCacheOwner)
-	codexBody, expandedInputRaw := bodyPreparation.Body, bodyPreparation.ExpandedInputRaw
+	codexBody, expandedInputRaw := bodyPreparation.Body, bodyPreparation.ExpandedInput
 	continuationStatus, continuationReason, continuationUnavailable := responseCachePreparationFailure(bodyPreparation)
 	// strip 策略：剥离网关注入及客户端携带的图片工具能力声明，作为普通文本请求继续（issue #411）。
 	codexBody = applyImageGenerationStripPolicy(c, codexBody)
@@ -4368,7 +4362,7 @@ func (h *Handler) Responses(c *gin.Context) {
 						}
 						if codexChanged {
 							codexBody = strippedCodexBody
-							expandedInputRaw = responsesInputRaw(codexBody)
+							expandedInputRaw = responsesInputView(codexBody)
 						}
 						log.Printf("OpenAI Responses 上游拒绝 encrypted_content，已移除加密 reasoning 上下文并重试一次 (attempt %d)", attempt+1)
 						h.store.Release(account)
@@ -5112,7 +5106,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					}
 					if codexChanged {
 						codexBody = strippedCodexBody
-						expandedInputRaw = responsesInputRaw(codexBody)
+						expandedInputRaw = responsesInputView(codexBody)
 					}
 					log.Printf("上游拒绝 encrypted_content，已移除加密 reasoning 上下文并重试一次 (attempt %d)", attempt+1)
 					h.store.Release(account)
@@ -5132,7 +5126,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				if compacted, ok := h.compactOverflowResponsesBodyForRequest(c, codexBody); ok {
 					overflowCompactRetried = true
 					codexBody = compacted
-					expandedInputRaw = responsesInputRaw(codexBody)
+					expandedInputRaw = responsesInputView(codexBody)
 					log.Printf("上游报上下文超窗，已压缩旧轮次并重试一次 (attempt %d)", attempt+1)
 					continue
 				}
@@ -5712,7 +5706,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					h.recordCompactionProvenanceFromPayload(context.Background(), account, payload)
 				}
 				if isStream && len(completedResponseData) > 0 {
-					cacheCompletedResponseWithOutputItems(respCacheOwner, []byte(expandedInputRaw), completedResponseData, completedResponseOutputItems)
+					cacheCompletedResponseWithOutputItems(respCacheOwner, expandedInputRaw, completedResponseData, completedResponseOutputItems)
 				}
 			}
 		}
@@ -5752,7 +5746,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			if compacted, ok := h.compactOverflowResponsesBodyForRequest(c, codexBody); ok {
 				overflowCompactRetried = true
 				codexBody = compacted
-				expandedInputRaw = responsesInputRaw(codexBody)
+				expandedInputRaw = responsesInputView(codexBody)
 				log.Printf("上游流内报上下文超窗，已压缩旧轮次并重试一次 (attempt %d)", attempt+1)
 				continue
 			}
@@ -5796,7 +5790,7 @@ func (h *Handler) Responses(c *gin.Context) {
 						h.recordCompactionProvenanceFromPayload(context.Background(), account, payload)
 					}
 					if len(completedResponseData) > 0 {
-						cacheCompletedResponseWithOutputItems(respCacheOwner, []byte(expandedInputRaw), completedResponseData, completedResponseOutputItems)
+						cacheCompletedResponseWithOutputItems(respCacheOwner, expandedInputRaw, completedResponseData, completedResponseOutputItems)
 					}
 				}
 			} else {
@@ -5897,7 +5891,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		// grok 渠道 Key 的模型由 Grok 上游校验，跳过网关侧模型白名单
 		rules["model"] = append(rules["model"], h.modelValidator(supportedModels))
 	}
-	result := validator.ValidateRequest(rules)
+	result := validator.ValidateRequestReadOnly(rules)
 	if !result.Valid {
 		api.SendError(c, validator.ToAPIError())
 		return
@@ -6753,7 +6747,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		// grok 渠道 Key 的模型由 Grok 上游校验，跳过网关侧模型白名单
 		rules["model"] = append(rules["model"], h.modelValidator(supportedModels))
 	}
-	result := validator.ValidateRequest(rules)
+	result := validator.ValidateRequestReadOnly(rules)
 	if !result.Valid {
 		api.SendError(c, validator.ToAPIError())
 		return
@@ -6808,13 +6802,12 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	}
 
 	// 2. 翻译请求：OpenAI Chat → Codex Responses
-	codexBody, err := TranslateRequest(rawBody)
+	codexBody, toolNameRestore, err := translateChatRequestWithRestore(rawBody)
 	if err != nil {
 		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidRequest, "Request translation failed: "+err.Error(), api.ErrorTypeInvalidRequest))
 		return
 	}
-	// 工具名在转换时可能被净化改写（codex_tool_names.go），响应侧按此表还原。
-	toolNameRestore := ChatToolNameRestoreMap(rawBody)
+	// 响应侧复用翻译时生成的工具名还原映射。
 	effectiveModel := effectiveRequestModel(codexBody, model)
 	logEffectiveModel := usageEffectiveModelForMapping(logModel, effectiveModel, mappingApplied)
 	if h.enforceAPIKeyLimitsAndReply(c, effectiveModel) {

@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -382,87 +381,6 @@ func codexResponsesLiteRequested(requestBody []byte, headers http.Header) bool {
 	return strings.EqualFold(strings.TrimSpace(gjson.GetBytes(requestBody, codexResponsesLiteWSMetadataPath).String()), "true")
 }
 
-// prepareCodexResponsesLiteTransport keeps the request-scoped Responses Lite
-// signal intact when codex2api changes the upstream transport. HTTP carries the
-// signal in a header; WebSocket carries it on each response.create frame so a
-// pooled connection can safely serve both Lite and non-Lite requests.
-func prepareCodexResponsesLiteTransport(requestBody []byte, headers http.Header, useWebsocket, enabled bool) ([]byte, http.Header) {
-	forwardHeaders := headers
-	headersCloned := false
-	if headers != nil && headers.Get(codexResponsesLiteHeader) != "" {
-		forwardHeaders = headers.Clone()
-		headersCloned = true
-		forwardHeaders.Del(codexResponsesLiteHeader)
-	}
-	if useWebsocket {
-		if enabled {
-			updated, err := sjson.SetBytes(requestBody, codexResponsesLiteWSMetadataPath, "true")
-			if err == nil {
-				requestBody = updated
-			}
-		} else if updated, err := sjson.DeleteBytes(requestBody, codexResponsesLiteWSMetadataPath); err == nil {
-			// 信号被模型门禁剥离（或下游标记非 true）时，清掉体内残留标记，
-			// 避免不支持 lite 的模型把标记带上 WS 上游触发 400。
-			requestBody = updated
-		}
-		return requestBody, forwardHeaders
-	}
-
-	if updated, err := sjson.DeleteBytes(requestBody, codexResponsesLiteWSMetadataPath); err == nil {
-		requestBody = updated
-	}
-	if enabled {
-		if !headersCloned {
-			forwardHeaders = headers.Clone()
-		}
-		if forwardHeaders == nil {
-			forwardHeaders = make(http.Header)
-		}
-		forwardHeaders.Set(codexResponsesLiteHeader, "true")
-	}
-	return requestBody, forwardHeaders
-}
-
-// normalizeCodexResponsesLiteBody 按上游对 Responses Lite 请求的强制约束净化请求体：
-// reasoning.context 必须为 all_turns、parallel_tool_calls 必须为 false，否则上游
-// 400 unsupported_value（WS/HTTP 均校验）。HTTP 上游还要求 tools 仅含 function/
-// custom/客户端执行的 tool search——网关自动注入的 hosted image_generation 工具
-// （及其桥接 instructions）会让整个请求被拒，须在发出前剥除；WS 上游接受该工具、
-// 生图桥接可用，不剥除以免功能回退。
-func normalizeCodexResponsesLiteBody(requestBody []byte, stripHostedTools bool) []byte {
-	requestBody, _ = sjson.SetBytes(requestBody, "parallel_tool_calls", false)
-	requestBody, _ = sjson.SetBytes(requestBody, "reasoning.context", "all_turns")
-	if !stripHostedTools {
-		return requestBody
-	}
-
-	if tools := gjson.GetBytes(requestBody, "tools"); tools.IsArray() {
-		kept := make([]json.RawMessage, 0, len(tools.Array()))
-		removed := false
-		for _, tool := range tools.Array() {
-			if strings.EqualFold(strings.TrimSpace(tool.Get("type").String()), "image_generation") {
-				removed = true
-				continue
-			}
-			kept = append(kept, json.RawMessage(tool.Raw))
-		}
-		if removed {
-			if len(kept) == 0 {
-				requestBody, _ = sjson.DeleteBytes(requestBody, "tools")
-			} else if raw, err := json.Marshal(kept); err == nil {
-				requestBody, _ = sjson.SetRawBytes(requestBody, "tools", raw)
-			}
-			if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(requestBody, "tool_choice.type").String()), "image_generation") {
-				requestBody, _ = sjson.DeleteBytes(requestBody, "tool_choice")
-			}
-		}
-	}
-	if instructions := gjson.GetBytes(requestBody, "instructions").String(); strings.Contains(instructions, codexImageGenerationBridgeMarker) {
-		requestBody, _ = sjson.SetBytes(requestBody, "instructions", removeCodexImageGenerationBridgeText(instructions))
-	}
-	return requestBody
-}
-
 // WebsocketExecuteFunc WebSocket 执行函数（由 wsrelay 包在 main.go 中注册，避免循环依赖）
 // poolRouteKey：本地连接池路由键（仅本地、永不发上游）。非空时 wsrelay 用它作 8 槽池的
 // baseKey，从而把"上游会话身份(每请求唯一)"与"连接复用(按 API Key 稳定)"解耦；空时沿用
@@ -532,7 +450,6 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	resetWsAcquireAudit(ctx)
 	var encryptedAttempt *encryptedContentAttempt
 	requestBody, encryptedAttempt = prepareEncryptedContentAttempt(ctx, account, requestBody, sessionID, headers)
-	defer func() { encryptedAttempt.observeResponse(upstreamResponse, requestBody) }()
 
 	// Payload 规则改写：在 WS/HTTP 分叉前统一应用，两条上游路径共享改写结果。
 	// 生图请求跳过——其 instructions/工具由网关自行构造，改写会破坏桥接协议。
@@ -549,6 +466,12 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	requestBody, daybreakErr = guardDaybreakUpstream(ctx, account, requestBody)
 	if daybreakErr != nil {
 		return nil, daybreakErr
+	}
+	if encryptedAttempt != nil {
+		// 后续指纹、时区、Lite 等改写不改变 reasoning/compaction 密文。
+		// 复用规则改写后的正文；无密文时不保留快照，以便图片队列释放正文。
+		encryptedObservationBody := requestBody
+		defer func() { encryptedAttempt.observeResponse(upstreamResponse, encryptedObservationBody) }()
 	}
 	// 指纹收敛在 WS/HTTP 分叉前统一改写请求体，两条上游路径共享结果；请求头侧的
 	// 收敛（ApplyCodexFingerprintHeaders）从同一份「账号 + 下游头」推导，取值一致。
@@ -607,10 +530,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		}
 	}
 	if wantWebsocket && WebsocketExecuteFunc != nil {
-		requestBody, headers = prepareCodexResponsesLiteTransport(requestBody, headers, true, responsesLite)
-		if responsesLite {
-			requestBody = normalizeCodexResponsesLiteBody(requestBody, false)
-		}
+		requestBody, headers = prepareCodexResponsesLiteRequest(requestBody, responsesLiteTransport{
+			headers: headers, websocket: true, enabled: responsesLite,
+		})
 		requestBody = normalizeCodexStructuredOutputForTransport(requestBody, true, responsesLite)
 		// 出站前最后兜底：任何中间改写都不能把普通 input 项放到
 		// compaction_trigger 后面，否则上游直接返回 invalid_request_error。
@@ -631,10 +553,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		// 静默落回 HTTP 会让“以为开了 WS 实际走 HTTP”难以排查，这里显式告警。
 		log.Printf("[WS] 警告: 期望走 WebSocket 上游，但 WebsocketExecuteFunc 未注册，已回退到 HTTP (account %d)", account.ID())
 	}
-	requestBody, headers = prepareCodexResponsesLiteTransport(requestBody, headers, false, responsesLite)
-	if responsesLite {
-		requestBody = normalizeCodexResponsesLiteBody(requestBody, true)
-	}
+	requestBody, headers = prepareCodexResponsesLiteRequest(requestBody, responsesLiteTransport{
+		headers: headers, enabled: responsesLite,
+	})
 	requestBody = normalizeCodexStructuredOutputForTransport(requestBody, false, responsesLite)
 	requestBody = normalizeCompactionTriggerFinal(requestBody, false)
 
@@ -660,34 +581,8 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		return nil, ErrNoAvailableAccount()
 	}
 
-	// ==================== Codex 请求体优化 ====================
-	// 参考 CLIProxyAPI/codex_executor.go + sub2api 的实现
-
-	// 1. 确保 instructions 字段存在（Codex 后端要求）
-	if !gjson.GetBytes(requestBody, "instructions").Exists() {
-		requestBody, _ = sjson.SetBytes(requestBody, "instructions", "")
-	}
-
-	// 2. 清理可能导致上游报错的多余字段
-	requestBody, _ = sjson.DeleteBytes(requestBody, "previous_response_id")
-	// 注意：HTTP /responses 上游不接受 prompt_cache_retention（会 400），必须删除；
-	// 该字段的 cache 收益只在 WS 路径注入（见 wsrelay 的 prepareWebsocketBody）。
-	requestBody, _ = sjson.DeleteBytes(requestBody, "prompt_cache_retention")
-	requestBody, _ = sjson.DeleteBytes(requestBody, "safety_identifier")
-	requestBody, _ = sjson.DeleteBytes(requestBody, "disable_response_storage")
-	// 顶层 type 是 Responses WS 事件信封字段（response.create），native WS ingress 的
-	// 1009 降级、生图强制 HTTP、Agent Identity 强制 HTTP 都会复用带信封的 body，而
-	// HTTP /responses 上游不接受它（400 Unsupported parameter: type）。此处为出站
-	// 收口兜底；sjson 只删顶层路径，input[] 等嵌套 type 不受影响（issue #548）。
-	requestBody, _ = sjson.DeleteBytes(requestBody, "type")
-
-	// 3. 注入 prompt_cache_key（如果请求体中没有，且 sessionID 不为空）
-	existingCacheKey := strings.TrimSpace(gjson.GetBytes(requestBody, "prompt_cache_key").String())
-	cacheKey := existingCacheKey
-	if sessionID != "" {
-		cacheKey = sessionID
-		requestBody, _ = sjson.SetBytes(requestBody, "prompt_cache_key", cacheKey)
-	}
+	// 合并 HTTP 边界的字段改写，避免每个删除操作都复制整段正文。
+	requestBody, cacheKey := prepareCodexHTTPRequestBody(requestBody, sessionID)
 
 	endpoint := CodexBaseURL + "/responses"
 
@@ -818,7 +713,7 @@ func ExecuteOpenAIResponsesRequest(ctx context.Context, account *auth.Account, r
 	requestBody, encryptedAttempt = prepareEncryptedContentAttempt(ctx, account, requestBody, "", headers)
 	defer func() { encryptedAttempt.observeResponse(upstreamResponse, requestBody) }()
 	responsesLite := gateResponsesLiteForAccount(codexResponsesLiteRequested(requestBody, headers), requestBody, account)
-	requestBody, headers = prepareCodexResponsesLiteTransport(requestBody, headers, false, responsesLite)
+	requestBody, headers = prepareCodexResponsesLiteTransport(requestBody, responsesLiteTransport{headers: headers, websocket: false, enabled: responsesLite})
 	requestBody = normalizeCompactionTriggerFinal(requestBody, false)
 
 	baseURL, apiKey := account.OpenAIResponsesCredentials()
@@ -1040,7 +935,7 @@ func ExecuteOpenAIResponsesCompactRequest(ctx context.Context, account *auth.Acc
 	requestBody, encryptedAttempt = prepareEncryptedContentAttempt(ctx, account, requestBody, "", headers)
 	defer func() { encryptedAttempt.observeResponse(upstreamResponse, requestBody) }()
 	responsesLite := gateResponsesLiteForAccount(codexResponsesLiteRequested(requestBody, headers), requestBody, account)
-	requestBody, headers = prepareCodexResponsesLiteTransport(requestBody, headers, false, responsesLite)
+	requestBody, headers = prepareCodexResponsesLiteTransport(requestBody, responsesLiteTransport{headers: headers, websocket: false, enabled: responsesLite})
 
 	baseURL, apiKey := account.OpenAIResponsesCredentials()
 	account.Mu().RLock()
@@ -1118,7 +1013,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	requestBody, _ = sjson.DeleteBytes(requestBody, "disable_response_storage")
 	// 顶层 type 是 WS 事件信封字段，compact HTTP 端点同样不接受，兜底删除(issue #548)。
 	requestBody, _ = sjson.DeleteBytes(requestBody, "type")
-	requestBody, headers = prepareCodexResponsesLiteTransport(requestBody, headers, false, responsesLite)
+	requestBody, headers = prepareCodexResponsesLiteTransport(requestBody, responsesLiteTransport{headers: headers, websocket: false, enabled: responsesLite})
 	// 指纹收敛：与 ExecuteRequest 同样在请求体定稿后、构造出站请求前改写
 	// client_metadata。漏掉这一步会让 compact 路径只收敛请求头、请求体仍带客户端
 	// 真实标识，上游看到「头说设备 A、体说设备 B」这种真实客户端不会有的矛盾。

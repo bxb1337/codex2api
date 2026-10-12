@@ -5,7 +5,6 @@ import (
 	"container/list"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -13,6 +12,8 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/internal/jsonbody"
+	json "github.com/goccy/go-json"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -128,7 +129,7 @@ func encryptedPayloadDigests(body []byte) []encryptedDigest {
 		return nil
 	}
 	var digests []encryptedDigest
-	input := gjson.GetBytes(body, "input")
+	input := gjson.Get(jsonbody.ReadOnlyText(body), "input")
 	visit := func(item gjson.Result) {
 		if digest, ok := encryptedItemDigest(item); ok && len(digests) < encryptedMemoryMaxDigests {
 			digests = append(digests, digest)
@@ -146,7 +147,7 @@ func stripRememberedEncryptedContent(body []byte, invalid map[encryptedDigest]st
 	if len(invalid) == 0 || !bytes.Contains(body, []byte(`"encrypted_content"`)) {
 		return body
 	}
-	input := gjson.GetBytes(body, "input")
+	input := gjson.Get(jsonbody.ReadOnlyText(body), "input")
 	if input.IsObject() {
 		if digest, ok := encryptedItemDigest(input); ok {
 			if _, rejected := invalid[digest]; rejected {
@@ -161,19 +162,7 @@ func stripRememberedEncryptedContent(body []byte, invalid map[encryptedDigest]st
 	if !input.IsArray() {
 		return body
 	}
-	changed := false
-	items := make([]json.RawMessage, 0, len(input.Array()))
-	input.ForEach(func(_, item gjson.Result) bool {
-		digest, ok := encryptedItemDigest(item)
-		if _, rejected := invalid[digest]; ok && rejected {
-			// These are the same reasoning/compaction items removed by the
-			// existing invalid_encrypted_content recovery, with exact hash scope.
-			changed = true
-			return true
-		}
-		items = append(items, json.RawMessage(item.Raw))
-		return true
-	})
+	items, changed := filterRememberedEncryptedItems(input, invalid)
 	if !changed {
 		return body
 	}

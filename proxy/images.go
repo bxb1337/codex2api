@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
@@ -28,9 +27,11 @@ import (
 	"github.com/codex2api/internal/imageproc"
 	"github.com/codex2api/internal/imagestore"
 	"github.com/codex2api/internal/imageupscale"
+	"github.com/codex2api/internal/jsonbody"
 	"github.com/codex2api/security"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -953,6 +954,9 @@ func stripImageGenerationToolsFromArray(tools []gjson.Result) ([]interface{}, bo
 //     工具选择保持不变。
 //  4. 清理网关自己追加的图片桥接 instructions，保留用户自带的 instructions 内容。
 func stripResponsesImageGenerationCapabilities(body []byte) []byte {
+	if len(body) >= responsesImageStripBatchMinBytes {
+		return stripLargeResponsesImageGenerationCapabilities(body)
+	}
 	// 1. 顶层 tools[]
 	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && tools.IsArray() {
 		if kept, removed := stripImageGenerationToolsFromArray(tools.Array()); removed {
@@ -1002,10 +1006,11 @@ func stripResponsesInputImageTools(body []byte) []byte {
 	// The wildcard admits whitespace around the type, matching the existing
 	// TrimSpace policy, and decodes JSON escapes. It returns only a candidate
 	// carrier rather than copying the entire input just to learn none exists.
-	if !gjson.GetBytes(body, `input.#(type%"*additional_tools*")`).Exists() {
+	text := jsonbody.ReadOnlyText(body)
+	if !gjson.Get(text, `input.#(type%"*additional_tools*")`).Exists() {
 		return body
 	}
-	input := gjson.GetBytes(body, "input")
+	input := gjson.Get(text, "input")
 	if !input.IsArray() {
 		return body
 	}

@@ -13,6 +13,7 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/internal/jsonbody"
 )
 
 // Codex 设备指纹收敛：把出站请求里携带的客户端标识改写成账号级恒定值，
@@ -389,31 +390,30 @@ func ApplyCodexFingerprintToBody(body []byte, account *auth.Account, downstreamH
 	if ids == nil {
 		return body
 	}
-	if !gjson.GetBytes(body, "client_metadata").IsObject() {
+	editor := jsonbody.New(body)
+	if !editor.Get("client_metadata").IsObject() {
 		return body
 	}
 
-	body = setExistingJSONString(body, "client_metadata.x-codex-installation-id", ids.installationID)
+	setExistingJSONField(editor, "client_metadata.x-codex-installation-id", ids.installationID)
 	if ids.mode == auth.CodexFingerprintModeSingleMachineMultiWindow {
-		body = setExistingJSONString(body, "client_metadata.installation_id", ids.installationID)
-		body = rewriteSingleMachineBodyLineage(body, ids)
+		setExistingJSONField(editor, "client_metadata.installation_id", ids.installationID)
+		rewriteSingleMachineBodyLineage(editor, ids)
 	}
 	if ids.mode != auth.CodexFingerprintModeDevice {
-		body = setExistingJSONString(body, "client_metadata.session_id", ids.sessionID)
-		body = setExistingJSONString(body, "client_metadata.thread_id", ids.threadID)
-		body = setExistingJSONString(body, "client_metadata.x-codex-window-id", ids.windowID)
+		setExistingJSONField(editor, "client_metadata.session_id", ids.sessionID)
+		setExistingJSONField(editor, "client_metadata.thread_id", ids.threadID)
+		setExistingJSONField(editor, "client_metadata.x-codex-window-id", ids.windowID)
 	}
 
 	// client_metadata 里可能内嵌一份 turn metadata JSON 字符串，同样要收敛。
 	const embeddedPath = "client_metadata.x-codex-turn-metadata"
-	if embedded := gjson.GetBytes(body, embeddedPath); embedded.Type == gjson.String {
+	if embedded := editor.Get(embeddedPath); embedded.Type == gjson.String {
 		if rewritten, changed := rewriteCodexTurnMetadataJSON(embedded.String(), ids); changed {
-			if updated, err := sjson.SetBytes(body, embeddedPath, rewritten); err == nil {
-				body = updated
-			}
+			editor.Set(embeddedPath, rewritten)
 		}
 	}
-	return body
+	return editor.Bytes()
 }
 
 // rewriteCodexTurnMetadataJSON 收敛 turn metadata JSON 里的身份字段。
@@ -629,19 +629,13 @@ func isPlaceholderWorkspacePath(path string) bool {
 	return true
 }
 
-// setExistingJSONString 只在目标路径已存在时替换其值，避免给客户端未携带该字段的
-// 请求新增字段。
-func setExistingJSONString(body []byte, path, value string) []byte {
+// setExistingJSONField 只改写已有字段，避免补入客户端没有携带的标识。
+func setExistingJSONField(editor *jsonbody.Editor, path, value string) {
 	if value == "" {
-		return body
+		return
 	}
-	existing := gjson.GetBytes(body, path)
-	if !existing.Exists() || existing.String() == value {
-		return body
+	existing := editor.Get(path)
+	if existing.Exists() && existing.String() != value {
+		editor.Set(path, value)
 	}
-	updated, err := sjson.SetBytes(body, path, value)
-	if err != nil {
-		return body
-	}
-	return updated
 }

@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -15,6 +14,7 @@ import (
 	"github.com/codex2api/database"
 	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 	"github.com/tidwall/gjson"
 )
 
@@ -135,7 +135,7 @@ func (h *Handler) GeminiModelsAction(c *gin.Context) {
 	}
 	model := normalizeGeminiPublicModel(parts[0])
 	method := parts[1]
-	rawBody, err := io.ReadAll(io.LimitReader(c.Request.Body, int64(security.MaxRequestBodySize+1)))
+	rawBody, err := readLimitedRawRequestBody(c, int64(security.MaxRequestBodySize+1))
 	if err != nil {
 		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidRequest, "Failed to read request body", api.ErrorTypeInvalidRequest))
 		return

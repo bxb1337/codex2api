@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/internal/jsonbody"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -47,16 +48,15 @@ func convergeFingerprintLineageMetadata(raw string, ids *codexFingerprintIDs) (s
 	return raw, changed
 }
 
-func rewriteSingleMachineBodyLineage(body []byte, ids *codexFingerprintIDs) []byte {
+func rewriteSingleMachineBodyLineage(editor *jsonbody.Editor, ids *codexFingerprintIDs) {
 	for _, key := range codexLineageMetadataPaths {
 		path := "client_metadata." + key
-		v := gjson.GetBytes(body, path)
+		v := editor.Get(path)
 		if v.Type == gjson.String && strings.TrimSpace(v.String()) != "" {
-			body = setExistingJSONString(body, path, convergeFingerprintLineageValue(ids, key, strings.TrimSpace(v.String())))
+			setExistingJSONField(editor, path, convergeFingerprintLineageValue(ids, key, strings.TrimSpace(v.String())))
 		}
 	}
-	body = setExistingJSONString(body, "client_metadata.window_id", ids.windowID)
-	return body
+	setExistingJSONField(editor, "client_metadata.window_id", ids.windowID)
 }
 
 // PrepareCodexFingerprintHeaders makes body-only identities available to all

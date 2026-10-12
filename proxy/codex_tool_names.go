@@ -212,6 +212,10 @@ func applyCodexToolNameMap(out map[string]any, nameMap map[string]string) {
 // 名字时返回 nil。与 TranslateRequest 从同一份解析结果推导。
 func ChatToolNameRestoreMap(rawJSON []byte) map[string]string {
 	nameMap := buildCodexToolNameMap(collectChatToolNames(cachedOrParse(rawJSON)))
+	return restoreMapForCodexToolNames(nameMap)
+}
+
+func restoreMapForCodexToolNames(nameMap map[string]string) map[string]string {
 	if len(nameMap) == 0 {
 		return nil
 	}

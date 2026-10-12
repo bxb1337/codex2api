@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -17,7 +16,9 @@ import (
 
 	"github.com/codex2api/api"
 	"github.com/codex2api/auth"
+	"github.com/codex2api/internal/jsonbody"
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 	"github.com/tidwall/gjson"
 )
 
@@ -195,7 +196,7 @@ func requestCompactionEncryptedContents(body []byte) []string {
 	if !compactionPayloadMayContainEncryptedState(body) {
 		return nil
 	}
-	input := gjson.GetBytes(body, "input")
+	input := gjson.Get(jsonbody.ReadOnlyText(body), "input")
 	if !input.Exists() {
 		return nil
 	}
@@ -205,7 +206,8 @@ func requestCompactionEncryptedContents(body []byte) []string {
 			return
 		}
 		if encrypted := strings.TrimSpace(item.Get("encrypted_content").String()); encrypted != "" {
-			contents = append(contents, encrypted)
+			// 仅复制返回字段，避免借用字符串长期保留整份正文。
+			contents = append(contents, strings.Clone(encrypted))
 		}
 	}
 	if input.IsArray() {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"net/http"
 	"strings"
 	"sync"
@@ -12,7 +11,9 @@ import (
 
 	"github.com/codex2api/api"
 	"github.com/codex2api/auth"
+	"github.com/codex2api/internal/jsonbody"
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 	"github.com/tidwall/gjson"
 )
 
@@ -162,7 +163,7 @@ func cacheNativeWSContext(snapshot nativeWSCompletedContext) {
 	if json.Unmarshal([]byte(input), &items) != nil {
 		return
 	}
-	terminal := gjson.GetBytes(completed, "response.output").Array()
+	terminal := gjson.Get(jsonbody.ReadOnlyText(completed), "response.output").Array()
 	if len(terminal) > len(outputs) {
 		outputs = nil
 		for _, item := range terminal {

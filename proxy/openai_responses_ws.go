@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/security"
+	json "github.com/goccy/go-json"
 	"github.com/gorilla/websocket"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -524,13 +524,15 @@ func (p *openAIResponsesWSPool) retireLocked(conn *openAIResponsesWSConn) *webso
 	}
 	conn.dead = true
 	conn.busy = false
-	filtered := p.conns[:0]
-	for _, candidate := range p.conns {
-		if candidate != conn {
-			filtered = append(filtered, candidate)
+	for index, candidate := range p.conns {
+		if candidate == conn {
+			copy(p.conns[index:], p.conns[index+1:])
+			last := len(p.conns) - 1
+			p.conns[last] = nil
+			p.conns = p.conns[:last]
+			break
 		}
 	}
-	p.conns = filtered
 	for id := range conn.response {
 		key := openAIResponsesWSBindingKey(conn.spec.accountID, id)
 		if p.bindings[key] == conn {
@@ -538,7 +540,9 @@ func (p *openAIResponsesWSPool) retireLocked(conn *openAIResponsesWSConn) *webso
 		}
 	}
 	p.wakeLocked(conn)
-	p.wakeSpecLocked(conn.spec.id())
+	if len(p.idleWait) > 0 {
+		p.wakeSpecLocked(conn.spec.id())
+	}
 	socket := conn.conn
 	conn.conn = nil
 	return socket

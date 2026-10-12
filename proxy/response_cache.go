@@ -5,8 +5,6 @@ import (
 	"container/list"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -15,6 +13,8 @@ import (
 
 	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
+	"github.com/codex2api/internal/jsonbody"
+	json "github.com/goccy/go-json"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -937,9 +937,7 @@ func readResponseContextBackend(ctx context.Context, runtimeCache cache.TokenCac
 	// pre-deserialization bound provided by BoundedResponseContextReader.
 	items, err := runtimeCache.GetResponseContext(ctx, storeKey)
 	if err != nil {
-		var syntaxErr *json.SyntaxError
-		var typeErr *json.UnmarshalTypeError
-		if errors.As(err, &syntaxErr) || errors.As(err, &typeErr) {
+		if isResponseCacheJSONError(err) {
 			return cache.ResponseContextReadResult{Status: cache.ResponseContextReadCorrupt}, nil
 		}
 		return cache.ResponseContextReadResult{}, err
@@ -1107,7 +1105,7 @@ func cacheCompletedResponseWithOutputItems(owner string, expandedInputRaw []byte
 	// 仅在响应包含可安全回放的 Codex 工具调用时才缓存（普通对话无需
 	// previous_response_id 展开）。image_generation_call / web_search_call
 	// 虽然也是 *_call 结尾，但不属于 call_id 工具续链体系。
-	output := gjson.GetBytes(completedData, "response.output")
+	output := gjson.Get(jsonbody.ReadOnlyText(completedData), "response.output")
 	if !output.IsArray() && len(outputItems) == 0 {
 		return
 	}
@@ -1120,7 +1118,7 @@ func cacheCompletedResponseWithOutputItems(owner string, expandedInputRaw []byte
 	})
 	if len(replayableOutput) == 0 {
 		for _, raw := range outputItems {
-			if replayable, ok := replayableCachedOutputItem(gjson.ParseBytes(raw)); ok {
+			if replayable, ok := replayableCachedOutputItem(gjson.Parse(jsonbody.ReadOnlyText(raw))); ok {
 				replayableOutput = append(replayableOutput, replayable)
 			}
 		}
@@ -1139,7 +1137,7 @@ func cacheCompletedResponseWithOutputItems(owner string, expandedInputRaw []byte
 
 	// 添加展开后的请求 input items。先成对移除参数被截断的普通
 	// function_call/function_call_output，避免缓存把毒历史延长到下一轮。
-	inputItems := gjson.ParseBytes(sanitizeResponseCacheInput(expandedInputRaw))
+	inputItems := gjson.Parse(jsonbody.ReadOnlyText(sanitizeResponseCacheInput(expandedInputRaw)))
 	if inputItems.IsArray() {
 		inputItems.ForEach(func(_, v gjson.Result) bool {
 			if item, ok := replayableCachedInputItem(v); ok {
@@ -1198,10 +1196,11 @@ func replayableCachedOutputItem(item gjson.Result) (json.RawMessage, bool) {
 }
 
 func normalizeReplayableCachedFunctionCall(raw json.RawMessage) (json.RawMessage, bool) {
-	if gjson.GetBytes(raw, "type").String() != "function_call" {
+	text := jsonbody.ReadOnlyText(raw)
+	if gjson.Get(text, "type").String() != "function_call" {
 		return raw, true
 	}
-	argumentValue := gjson.GetBytes(raw, "arguments")
+	argumentValue := gjson.Get(text, "arguments")
 	arguments := ""
 	if argumentValue.Exists() && argumentValue.Type != gjson.Null {
 		if argumentValue.Type == gjson.String {
@@ -1222,22 +1221,6 @@ func normalizeReplayableCachedFunctionCall(raw json.RawMessage) (json.RawMessage
 		return nil, false
 	}
 	return json.RawMessage(updated), true
-}
-
-func stripResponseItemID(raw json.RawMessage) (json.RawMessage, bool) {
-	var item map[string]any
-	if err := json.Unmarshal(raw, &item); err != nil || item == nil {
-		return raw, true
-	}
-	if _, exists := item["id"]; !exists {
-		return raw, true
-	}
-	delete(item, "id")
-	stripped, err := json.Marshal(item)
-	if err != nil {
-		return nil, false
-	}
-	return stripped, true
 }
 
 func isCodexToolCallContextType(typ string) bool {
