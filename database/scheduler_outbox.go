@@ -69,17 +69,7 @@ func (db *DB) ListSchedulerOutboxEventsAfter(ctx context.Context, afterID int64,
 	}
 	defer rows.Close()
 
-	events := make([]SchedulerOutboxEvent, 0, limit)
-	for rows.Next() {
-		var event SchedulerOutboxEvent
-		var created any
-		if err := rows.Scan(&event.ID, &event.EntityType, &event.EntityID, &event.EventType, &created); err != nil {
-			return nil, err
-		}
-		event.CreatedAt, _ = parseDBTimeValue(created)
-		events = append(events, event)
-	}
-	return events, rows.Err()
+	return readSchedulerOutboxEvents(rows, limit)
 }
 
 // ListSchedulerOutboxEventsByIDs fetches specific event rows. The consumer
@@ -106,17 +96,7 @@ func (db *DB) ListSchedulerOutboxEventsByIDs(ctx context.Context, ids []int64) (
 	}
 	defer rows.Close()
 
-	events := make([]SchedulerOutboxEvent, 0, len(ids))
-	for rows.Next() {
-		var event SchedulerOutboxEvent
-		var created any
-		if err := rows.Scan(&event.ID, &event.EntityType, &event.EntityID, &event.EventType, &created); err != nil {
-			return nil, err
-		}
-		event.CreatedAt, _ = parseDBTimeValue(created)
-		events = append(events, event)
-	}
-	return events, rows.Err()
+	return readSchedulerOutboxEvents(rows, len(ids))
 }
 
 func (db *DB) CleanupSchedulerOutbox(ctx context.Context, olderThan time.Time, limit int) (int64, error) {
