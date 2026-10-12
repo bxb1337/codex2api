@@ -25,6 +25,11 @@ func writeResponsesWSTurnMessage(c *gin.Context, conn *websocket.Conn, payload [
 	return writeResponsesWSMessage(conn, payload)
 }
 
+func responsesWSTurnFailureHidden(c *gin.Context) bool {
+	lane := responsesWSLaneForContext(c)
+	return lane != nil && !lane.steering.deliverFailure()
+}
+
 func writeResponsesWSTurnError(c *gin.Context, conn *websocket.Conn, apiErr *api.APIError) error {
 	return writeResponsesWSTurnErrorWithin(c, conn, responsesWSTurnError{apiErr, responsesWSWriteTimeout})
 }

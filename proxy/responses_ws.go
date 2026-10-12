@@ -1253,6 +1253,13 @@ func (h *Handler) streamResponsesWSUpstream(
 			gotTerminal = true
 			preContentErrorCandidate = nil
 		}
+		if interactive && viaWebsocket && eventType == "error" {
+			terminalFailurePayload = append([]byte(nil), data...)
+			terminalFailureEventType, gotTerminal = eventType, true
+			if responsesWSTurnFailureHidden(c) {
+				return false
+			}
+		}
 		if wsReplay != nil {
 			// Continuous retry keeps the complete attempt private. Any upstream
 			// error event is authoritative and ends the attempt immediately, even if
@@ -1679,6 +1686,9 @@ func normalizeResponsesWebSocketClientPayload(raw []byte) ([]byte, string, *api.
 	}
 	if !gjson.ValidBytes(trimmed) {
 		return nil, "", api.NewAPIError(api.ErrCodeInvalidRequest, "invalid websocket request payload", api.ErrorTypeInvalidRequest)
+	}
+	if apiErr := validateResponsesWSCreateEnvelope(trimmed); apiErr != nil {
+		return nil, "", apiErr
 	}
 
 	eventType := strings.TrimSpace(gjson.GetBytes(trimmed, "type").String())

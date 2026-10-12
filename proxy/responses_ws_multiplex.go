@@ -16,15 +16,16 @@ const responsesWSActiveLaneLimit = 16
 const responsesWSNamedLaneLimit = 32
 
 type responsesWSMultiplexer struct {
-	handler *Handler
-	base    *gin.Context
-	conn    *websocket.Conn
-	ctx     context.Context
-	cancel  context.CancelFunc
-	lanes   map[string]*responsesWSLane
-	slots   chan struct{}
-	workers sync.WaitGroup
-	named   atomic.Int64
+	handler  *Handler
+	base     *gin.Context
+	conn     *websocket.Conn
+	ctx      context.Context
+	cancel   context.CancelFunc
+	lanes    map[string]*responsesWSLane
+	slots    chan struct{}
+	workers  sync.WaitGroup
+	named    atomic.Int64
+	retained atomic.Int64
 }
 
 func newResponsesWSMultiplexer(h *Handler, c *gin.Context, conn *websocket.Conn) *responsesWSMultiplexer {
@@ -102,7 +103,14 @@ func (m *responsesWSMultiplexer) lane(streamID string) (*responsesWSLane, *api.A
 		return nil, api.NewAPIError(api.ErrorCode("websocket_stream_limit_reached"), "WebSocket named stream limit reached", api.ErrorTypeInvalidRequest)
 	}
 	lane := &responsesWSLane{mux: m, streamID: streamID, messages: make(chan responsesWSInboundMessage, responsesWSInboundQueueCapacity)}
+	lane.steering = &responsesWSSteering{lane: lane}
 	m.lanes[streamID] = lane
+	controls, _ := m.ctx.Value(responsesWSControlSessionKey{}).(*responsesWSControlSession)
+	if controls != nil {
+		controls.mu.Lock()
+		controls.lanes[streamID] = lane
+		controls.mu.Unlock()
+	}
 	if streamID != "" {
 		m.named.Add(1)
 	}
@@ -139,12 +147,15 @@ func validResponsesWSStreamID(id string) bool {
 		return false
 	}
 	for _, char := range id {
-		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '-' || char == '.' {
-			continue
+		if !validResponsesWSStreamCharacter(char) {
+			return false
 		}
-		return false
 	}
 	return true
+}
+
+func validResponsesWSStreamCharacter(char rune) bool {
+	return char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '-' || char == '.'
 }
 
 func responsesWSConnectionFatal(err error) bool {

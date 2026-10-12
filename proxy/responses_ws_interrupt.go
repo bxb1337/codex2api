@@ -8,6 +8,7 @@ import (
 	"github.com/codex2api/api"
 	"github.com/gorilla/websocket"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const responsesWSControlIDMaxLength = 256
@@ -79,6 +80,10 @@ func (s *responsesWSControlSession) handle(ctx context.Context, message response
 		return
 	}
 	payload, _ := stripNewAPIPolicyWebSocketEventID(message.payload)
+	if gjson.GetBytes(payload, "type").String() == "response.steer" {
+		s.handleSteer(payload)
+		return
+	}
 	responseID, apiErr := normalizeResponsesWSInterrupt(payload)
 	if apiErr == nil {
 		encoded, err := encodeResponsesWSInterrupt(payload, responseID)
@@ -91,9 +96,24 @@ func (s *responsesWSControlSession) handle(ctx context.Context, message response
 	if apiErr == nil || ctx.Err() != nil {
 		return
 	}
-	if err := writeResponsesWSInterruptError(s.conn, message.payload, apiErr); err != nil {
+	if err := s.writeInterruptError(message.payload, apiErr); err != nil {
 		_ = s.conn.Close()
 	}
+}
+
+func (s *responsesWSControlSession) writeInterruptError(request []byte, apiErr *api.APIError) error {
+	lane := s.responseLane(gjson.GetBytes(request, "response_id").String())
+	if lane == nil {
+		return writeResponsesWSInterruptError(s.conn, request, apiErr)
+	}
+	payload, err := encodeResponsesWSError(apiErr)
+	if err != nil {
+		return err
+	}
+	if eventID := gjson.GetBytes(request, "event_id").String(); len(eventID) <= responsesWSControlIDMaxLength && eventID != "" {
+		payload, _ = sjson.SetBytes(payload, "event_id", eventID)
+	}
+	return lane.writeRaw(payload, responsesWSWriteTimeout)
 }
 
 func writeResponsesWSInterruptError(conn *websocket.Conn, request []byte, apiErr *api.APIError) error {
