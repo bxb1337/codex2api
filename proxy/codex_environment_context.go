@@ -11,6 +11,7 @@ import (
 	"github.com/tidwall/sjson"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/internal/jsonbody"
 )
 
 // Codex 账号绑定时区：把出站请求体里由客户端生成的 <environment_context> 时区与日期
@@ -50,6 +51,8 @@ func loadLocationCached(name string) *time.Location {
 		return loc
 	}
 	loc, err := time.LoadLocation(name)
+	// 客户端标签可能是大消息的子串，缓存键只持有时区名称。
+	name = strings.Clone(name)
 	if err != nil {
 		// 也缓存失败结果，避免坏值反复触发磁盘读取。
 		environmentLocationCache.Store(name, (*time.Location)(nil))
@@ -70,35 +73,42 @@ func ApplyCodexTimezoneToBody(body []byte, account *auth.Account, now time.Time)
 	if loc == nil {
 		return body
 	}
-	// 不能在原始字节上预检 "<environment_context>"：prepare 阶段已用 encoding/json 重编
-	// 请求体，"<" 落地成 \u003c。只在 gjson 解码后的文本上判断。
-	input := gjson.GetBytes(body, "input")
+	editor := environmentBodyEditor{body: jsonbody.New(body), timezone: timezone, today: now.In(loc)}
+	input := editor.body.Get("input")
 	if !input.IsArray() {
 		return body
 	}
-	accountToday := now.In(loc)
-	input.ForEach(func(itemIndex, item gjson.Result) bool {
-		content := item.Get("content")
-		switch {
-		case content.Type == gjson.String:
-			if rewritten, changed := rewriteEnvironmentContextText(content.String(), timezone, accountToday); changed {
-				body = setJSONStringAtPath(body, fmt.Sprintf("input.%d.content", itemIndex.Int()), rewritten)
-			}
-		case content.IsArray():
-			content.ForEach(func(partIndex, part gjson.Result) bool {
-				text := part.Get("text")
-				if text.Type != gjson.String {
-					return true
-				}
-				if rewritten, changed := rewriteEnvironmentContextText(text.String(), timezone, accountToday); changed {
-					body = setJSONStringAtPath(body, fmt.Sprintf("input.%d.content.%d.text", itemIndex.Int(), partIndex.Int()), rewritten)
-				}
-				return true
-			})
-		}
-		return true
-	})
-	return body
+	input.ForEach(editor.appendMessage)
+	return editor.body.Bytes()
+}
+
+type environmentBodyEditor struct {
+	body     *jsonbody.Editor
+	timezone string
+	today    time.Time
+}
+
+func (e environmentBodyEditor) appendMessage(index, item gjson.Result) bool {
+	path := fmt.Sprintf("input.%d.content", index.Int())
+	content := item.Get("content")
+	if content.Type == gjson.String {
+		e.appendText(path, content)
+	} else if content.IsArray() {
+		content.ForEach(func(partIndex, part gjson.Result) bool {
+			e.appendText(fmt.Sprintf("%s.%d.text", path, partIndex.Int()), part.Get("text"))
+			return true
+		})
+	}
+	return true
+}
+
+func (e environmentBodyEditor) appendText(path string, text gjson.Result) {
+	if text.Type != gjson.String {
+		return
+	}
+	if rewritten, changed := rewriteEnvironmentContextText(text.String(), e.timezone, e.today); changed {
+		e.body.Set(path, rewritten)
+	}
 }
 
 func setJSONStringAtPath(body []byte, path, value string) []byte {
@@ -116,8 +126,6 @@ func rewriteEnvironmentContextText(text, timezone string, accountToday time.Time
 	if !strings.Contains(text, environmentContextOpenTag) {
 		return text, false
 	}
-	changed := false
-
 	// 客户端时区取自文本里第一个 <timezone>；平移天数只在客户端时区可加载时计算。
 	dayDelta, haveDelta := 0, false
 	if match := environmentTimezoneTagPattern.FindStringSubmatch(text); match != nil {
@@ -128,25 +136,20 @@ func rewriteEnvironmentContextText(text, timezone string, accountToday time.Time
 		}
 	}
 
-	rewritten := environmentTimezoneTagPattern.ReplaceAllStringFunc(text, func(tag string) string {
-		if environmentTimezoneTagPattern.FindStringSubmatch(tag)[1] == timezone {
-			return tag
-		}
-		changed = true
-		return "<timezone>" + timezone + "</timezone>"
+	patches := environmentTagValuePatches(text, environmentTimezoneTagPattern, func(string) string {
+		return timezone
 	})
 	if haveDelta && dayDelta != 0 {
-		rewritten = environmentDateTagPattern.ReplaceAllStringFunc(rewritten, func(tag string) string {
-			raw := environmentDateTagPattern.FindStringSubmatch(tag)[1]
-			parsed, err := time.ParseInLocation(environmentDateLayout, raw, time.UTC)
-			if err != nil {
-				return tag
-			}
-			changed = true
-			return "<current_date>" + parsed.AddDate(0, 0, dayDelta).Format(environmentDateLayout) + "</current_date>"
-		})
+		dateValue := func(raw string) string { return environmentDateValue(raw, dayDelta) }
+		// 非时区名称的直接调用保留先写时区、再扫描日期的原有顺序。
+		if strings.Contains(timezone, "<") {
+			rewritten, changed := applyEnvironmentValuePatches(text, patches)
+			result, dateChanged := replaceEnvironmentTagValues(rewritten, environmentDateTagPattern, dateValue)
+			return result, changed || dateChanged
+		}
+		patches = append(patches, environmentTagValuePatches(text, environmentDateTagPattern, dateValue)...)
 	}
-	return rewritten, changed
+	return applyEnvironmentValuePatches(text, patches)
 }
 
 // truncateToDay 把时刻截到所在时区的当日零点，再换成 UTC 表达以便相减得到整天差。
