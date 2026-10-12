@@ -1198,8 +1198,9 @@ func (h *Handler) streamResponsesWSUpstream(
 	emptyIncomplete := &emptyIncompleteTracker{}
 	terminalFailureEventType := ""
 	wroteAnyBody := false
+	interactive := responsesWSInteractive(c)
 	var wsReplay *continuousRetryWSReplay
-	if continuousRetryBuffersAttempts(continuousRetryPolicy) {
+	if continuousRetryBuffersAttempts(continuousRetryPolicy) && !interactive {
 		wsReplay = h.newContinuousRetryWSReplay()
 	}
 	finishContextCommit := func() {}
@@ -1339,7 +1340,7 @@ func (h *Handler) streamResponsesWSUpstream(
 			// previous_response_not_found 的先导 error 帧同样缓冲：它按 invalid_request
 			// 分类不属于可重试帧，立即写出会置位 wroteAnyBody，随后的 response.failed
 			// 就进不了下面的续链降级分支。
-			shouldDefer := shouldDeferPreContentSSEEvent(eventType, contentTokenSeen, gotTerminal, preflightPassthrough) ||
+			shouldDefer := (!interactive && shouldDeferPreContentSSEEvent(eventType, contentTokenSeen, gotTerminal, preflightPassthrough)) ||
 				(!contentTokenSeen && !wroteAnyBody && !gotTerminal && isRetryableUpstreamErrorFrame(eventType, data, continuousRetryPolicy)) ||
 				(allowContinuationDegrade && !contentTokenSeen && !gotTerminal && eventType == "error" && isPreviousResponseNotFoundBody(data))
 			if shouldDefer {
