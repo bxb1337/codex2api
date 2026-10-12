@@ -9,7 +9,6 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -41,6 +40,7 @@ import (
 	"github.com/codex2api/security"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
+	json "github.com/goccy/go-json"
 	"github.com/tidwall/gjson"
 )
 
@@ -1284,6 +1284,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/system/update", h.GetSystemUpdate)
 	api.POST("/system/update", h.PerformSystemUpdate)
 	api.GET("/ops/overview", h.GetOpsOverview)
+	api.GET("/ops/heap-profile", h.GetOpsHeapProfile)
 	api.GET("/ops/runtime-status", h.GetRuntimeStatus)
 	api.GET("/ops/errors", h.GetOpsErrorLogs)
 	api.GET("/ops/errors/export", h.ExportOpsErrorLogs)
