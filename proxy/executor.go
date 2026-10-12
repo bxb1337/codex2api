@@ -635,6 +635,10 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		// 静默落回 HTTP 会让“以为开了 WS 实际走 HTTP”难以排查，这里显式告警。
 		log.Printf("[WS] 警告: 期望走 WebSocket 上游，但 WebsocketExecuteFunc 未注册，已回退到 HTTP (account %d)", account.ID())
 	}
+	if resp, err := responsesHTTPPrewarm(ctx, requestBody); resp != nil || err != nil {
+		return resp, err
+	}
+	requestBody = prepareResponsesHTTPBody(requestBody)
 	requestBody, headers = prepareCodexResponsesLiteTransport(requestBody, headers, false, responsesLite)
 	if responsesLite {
 		requestBody = normalizeCodexResponsesLiteBody(requestBody, true)
@@ -860,6 +864,10 @@ func ExecuteOpenAIResponsesRequest(ctx context.Context, account *auth.Account, r
 	if openAIResponsesRelayUsesUpstreamWebsocket(account, requestBody) {
 		return executeOpenAIResponsesWebsocket(ctx, account, requestBody, proxyURL, headers, baseURL, apiKey)
 	}
+	if resp, err := responsesHTTPPrewarm(ctx, requestBody); resp != nil || err != nil {
+		return resp, err
+	}
+	requestBody = prepareResponsesHTTPBody(requestBody)
 
 	client := getPooledClient(account, proxyURL)
 	send := func(body []byte) (*http.Response, error) {
