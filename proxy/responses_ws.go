@@ -202,6 +202,9 @@ func startResponsesWSReadPump(ctx context.Context, conn *websocket.Conn, observe
 					observer(message)
 				}
 			}
+			if interceptResponsesWSControl(readCtx, message) {
+				continue
+			}
 			select {
 			case messages <- message:
 			case <-readCtx.Done():
@@ -264,7 +267,12 @@ func (h *Handler) ResponsesWebSocket(c *gin.Context) {
 		return
 	}
 	conn.SetReadLimit(int64(security.MaxRequestBodySize))
-	requestCtx, messages, readPumpDone, cancel := startResponsesWSReadPump(c.Request.Context(), conn)
+	finishWriter := registerResponsesWSWriter(conn)
+	defer finishWriter()
+	controls := newResponsesWSControlSession(conn)
+	controlCtx := context.WithValue(c.Request.Context(), responsesWSControlSessionKey{}, controls)
+	requestCtx, messages, readPumpDone, cancel := startResponsesWSReadPump(controlCtx, conn)
+	controls.start(requestCtx)
 	c.Request = c.Request.WithContext(requestCtx)
 	stopDownstreamKeepalive := startDownstreamWSKeepalive(requestCtx, conn, cancel)
 	defer func() {
@@ -273,6 +281,8 @@ func (h *Handler) ResponsesWebSocket(c *gin.Context) {
 		stopDownstreamKeepalive()
 		<-readPumpDone
 		drainResponsesWSInboundMessages(messages)
+		<-controls.done
+		controls.drain()
 	}()
 
 	for {
@@ -374,6 +384,8 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		_ = writeResponsesWSError(conn, apiErr)
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, apiErr)
 	}
+	finishControls := beginResponsesWSControlTurn(c)
+	defer finishControls()
 	// WebSocket turn metadata is frame-local. Cache a complete zero-or-set
 	// snapshot before any body rewrite so a later frame can never inherit the
 	// prior frame's compaction badges.
@@ -768,6 +780,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		guardCodexTurnStateEcho(affinityKey, account, downstreamHeaders)
 		upstreamSessionID := resolveUpstreamSessionID(apiKeyID, sessionIdentity.upstreamSeed, sessionIdentity.explicitUpstreamID, useWebsocket)
 		resp, reqErr := executeHTTPWithContinuousRetryKeepalive(upstreamCtx, func() (*http.Response, error) {
+			prepareResponsesWSControlAttempt(upstreamCtx)
 			if account.OpenAIResponsesUsesUpstreamWebsocket() {
 				return ExecuteOpenAIResponsesRequest(upstreamCtx, account, upstreamBody, proxyURL, downstreamHeaders)
 			}
@@ -1231,6 +1244,7 @@ func (h *Handler) streamResponsesWSUpstream(
 	}
 
 	readErr = readSSEStreamWithContinuousRetryKeepalive(c.Request.Context(), resp.Body, func(sseEvent string, data []byte) bool {
+		ObserveResponsesWebSocketControl(c.Request.Context(), data)
 		if wsReplay == nil {
 			h.recordCompactionProvenanceFromPayload(context.Background(), account, data)
 		}
@@ -1818,11 +1832,7 @@ func writeResponsesWSErrorWithin(conn *websocket.Conn, apiErr *api.APIError, tim
 	if err != nil {
 		return err
 	}
-	if conn == nil {
-		return errResponsesWSClientGone
-	}
-	_ = conn.SetWriteDeadline(time.Now().Add(timeout))
-	return conn.WriteMessage(websocket.TextMessage, payload)
+	return writeResponsesWSMessageWithin(conn, payload, timeout)
 }
 
 func responsesWSClientUpstreamAPIError(apiErr *api.APIError, hideUpstreamErrors bool) *api.APIError {
@@ -1833,11 +1843,7 @@ func responsesWSClientUpstreamAPIError(apiErr *api.APIError, hideUpstreamErrors 
 }
 
 func writeResponsesWSMessage(conn *websocket.Conn, payload []byte) error {
-	if conn == nil {
-		return errResponsesWSClientGone
-	}
-	_ = conn.SetWriteDeadline(time.Now().Add(responsesWSWriteTimeout))
-	return conn.WriteMessage(websocket.TextMessage, payload)
+	return writeResponsesWSMessageWithin(conn, payload, responsesWSWriteTimeout)
 }
 
 func closeResponsesWS(conn *websocket.Conn, code int, reason string) {

@@ -158,14 +158,16 @@ func (s openAIResponsesWSSpec) id() string {
 }
 
 type openAIResponsesWSConn struct {
-	spec     openAIResponsesWSSpec
-	conn     *websocket.Conn
-	created  time.Time
-	reused   bool
-	busy     bool
-	dead     bool
-	waiters  []chan struct{}
-	response map[string]struct{}
+	forwardInterrupt bool
+	writeMu          sync.Mutex
+	spec             openAIResponsesWSSpec
+	conn             *websocket.Conn
+	created          time.Time
+	reused           bool
+	busy             bool
+	dead             bool
+	waiters          []chan struct{}
+	response         map[string]struct{}
 }
 
 type openAIResponsesWSPool struct {
@@ -208,7 +210,7 @@ func (p *openAIResponsesWSPool) roundTrip(ctx context.Context, spec openAIRespon
 	if handshake != nil || err != nil || conn == nil {
 		return handshake, err
 	}
-	if err := writeOpenAIResponsesWS(ctx, conn.conn, body); err != nil {
+	if err := conn.write(ctx, body); err != nil {
 		reused := conn.reused
 		p.retire(conn)
 		if !reused {
@@ -218,11 +220,12 @@ func (p *openAIResponsesWSPool) roundTrip(ctx context.Context, spec openAIRespon
 		if handshake != nil || err != nil || conn == nil {
 			return handshake, err
 		}
-		if err := writeOpenAIResponsesWS(ctx, conn.conn, body); err != nil {
+		if err := conn.write(ctx, body); err != nil {
 			p.retire(conn)
 			return nil, fmt.Errorf("OpenAI Responses WebSocket 发送失败: %w", err)
 		}
 	}
+	conn.forwardInterrupt = gateResponsesLiteForModel(codexResponsesLiteRequested(body, spec.headers), body)
 	return openAIResponsesWSStream(ctx, p, conn), nil
 }
 
@@ -238,6 +241,7 @@ func writeOpenAIResponsesWS(ctx context.Context, conn *websocket.Conn, body []by
 }
 
 func openAIResponsesWSStream(ctx context.Context, pool *openAIResponsesWSPool, conn *openAIResponsesWSConn) *http.Response {
+	controls := registerOpenAIResponsesWSControl(ctx, pool, conn)
 	pr, pw := io.Pipe()
 	resp := &http.Response{
 		StatusCode:    http.StatusOK,
@@ -251,6 +255,7 @@ func openAIResponsesWSStream(ctx context.Context, pool *openAIResponsesWSPool, c
 
 	go func() {
 		defer pw.Close()
+		defer controls.Close()
 		var finished atomic.Bool
 		stop := make(chan struct{})
 		socket := conn.conn
@@ -267,6 +272,7 @@ func openAIResponsesWSStream(ctx context.Context, pool *openAIResponsesWSPool, c
 
 		terminal := false
 		err := readOpenAIResponsesWS(conn.conn, func(frame []byte) bool {
+			controls.Observe(frame)
 			if id := strings.TrimSpace(gjson.GetBytes(frame, "response.id").String()); id != "" {
 				pool.bind(conn, id)
 			}
@@ -295,6 +301,7 @@ func openAIResponsesWSStream(ctx context.Context, pool *openAIResponsesWSPool, c
 			return !terminal
 		})
 		finished.Store(true)
+		controls.Close()
 		if err != nil || !terminal || ctx.Err() != nil {
 			pool.retire(conn)
 			if err != nil && err != io.EOF {

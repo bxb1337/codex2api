@@ -231,6 +231,16 @@ OpenAI Responses 中转账号默认仍用 HTTP POST `/v1/responses`。账号设�
 
 原生 WebSocket 入口为 `GET /v1/responses`。通过校验与 API Key 限制后，较新的同 API Key、同渠道/分组路由作用域、同会话请求会抢占仍在运行的旧请求，并先取消旧上游以释放账号与并发位。`stream_id` 是抢占键的一部分，因此多路复用的不同流互不影响；不同 API Key 或不同路由作用域也不会互相取消。只有 `prompt_cache_key`、显式会话头、`previous_response_id`、turn state、专用 affinity key 或可稳定派生的内容会话存在时才启用，纯 API Key 兜底身份不会把无关请求合并。Redis 模式支持跨实例抢占，Memory 模式仅在当前进程内生效。
 
+Codex 在生成过程中追加消息时，可在同一连接发送 `response.interrupt`（单数），其中 `response_id` 来自当前 `response.created` 的 `response.id`：
+
+```json
+{"type":"response.interrupt","response_id":"resp_...","mode":"discard_partial_items"}
+```
+
+该控制帧独立于 `response.create` 队列处理，不要求 `model`，不新增模型请求计数。最终出站启用 Responses Lite 时，网关立即转发到当前轮次持有的上游 WebSocket，继续交付上游的中断确认、输出项中断事件及 `response.incomplete` 终态；普通 Responses、模型映射或账号能力门禁剥离 Lite 的请求，以及 HTTP 上游回退，沿用 Codex 的读取到终态再续接流程。OpenAI Responses 中转账号按最终模型与出站 Lite 信号选择同样的流程。客户端收到终态后可使用 `previous_response_id` 续接。`incomplete_details.reason` 为 `interrupted` 或 `steered` 的零输出响应保留原始终态和 usage，不改写为失败或触发透明重试。
+
+中断只能作用于本连接当前响应；重复中断和最近 64 个已结束响应的迟到中断会被忽略，避免干扰下一轮。无效响应 ID、未知字段或不支持的 mode 返回错误帧并保持连接，提供 `event_id` 时错误帧会携带它。此处实现的是 Codex 的 interrupt 流程；公开 Responses API 的 `response.steer` 自动续接事件仍需上游及网关另行支持。
+
 **响应示例:**
 
 ```json
