@@ -225,7 +225,7 @@ func (p *openAIResponsesWSPool) roundTrip(ctx context.Context, spec openAIRespon
 			return nil, fmt.Errorf("OpenAI Responses WebSocket 发送失败: %w", err)
 		}
 	}
-	conn.forwardInterrupt = gateResponsesLiteForModel(codexResponsesLiteRequested(body, spec.headers), body)
+	conn.forwardInterrupt = gateResponsesLiteForModel(CodexResponsesLiteEnabled(body), body)
 	return openAIResponsesWSStream(ctx, p, conn), nil
 }
 
