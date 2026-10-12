@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -24,6 +23,7 @@ import (
 	"github.com/codex2api/database"
 	"github.com/codex2api/internal/openaiidentity"
 	"github.com/codex2api/security/promptfilter"
+	json "github.com/goccy/go-json"
 )
 
 // AccountStatus 账号状态
@@ -9151,7 +9151,10 @@ func (s *Store) RemoveAccount(dbID int64) {
 	s.mu.Lock()
 	for i, acc := range s.accounts {
 		if acc.DBID == dbID {
-			s.accounts = append(s.accounts[:i], s.accounts[i+1:]...)
+			copy(s.accounts[i:], s.accounts[i+1:])
+			last := len(s.accounts) - 1
+			s.accounts[last] = nil
+			s.accounts = s.accounts[:last]
 			s.rebuildAccountIndex()
 			s.publishAccountSnapshot(s.accounts)
 			removed = true
@@ -11420,6 +11423,8 @@ func (s *Store) RemoveAccounts(dbIDs []int64) {
 			kept = append(kept, acc)
 		}
 	}
+	// 缩短切片前释放尾部账号引用，快照使用独立的指针数组。
+	clear(s.accounts[len(kept):])
 	s.accounts = kept
 	s.rebuildAccountIndex()
 	s.publishAccountSnapshot(s.accounts)
