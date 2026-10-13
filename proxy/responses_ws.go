@@ -1608,7 +1608,9 @@ func (h *Handler) streamResponsesWSUpstream(
 	applyImageUsageLogInfo(logInput, imageLogInfo)
 	// WS 轮终态记账：attempt 实发模型优先（effectiveModel），兜底客户端请求模型。
 	applyUpstreamResponseModelObservation(logInput, responseModelObserver, upstreamSentModelForAudit(effectiveModel, model), account.ID())
-	h.logUsageForRequest(c, logInput)
+	if !responsesWSRequestIsPrewarm(c) {
+		h.logUsageForRequest(c, logInput)
+	}
 
 	resp.Body.Close()
 	if outcome.penalize {
@@ -1620,7 +1622,9 @@ func (h *Handler) streamResponsesWSUpstream(
 	} else if outcome.logStatusCode == http.StatusOK {
 		h.store.ClearModelCooldown(account, effectiveModel)
 		h.store.ConfirmResponsesAvailableSince(account, start)
-		h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)
+		if !responsesWSRequestIsPrewarm(c) {
+			h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)
+		}
 	}
 	if outcome.logStatusCode == http.StatusOK {
 		h.store.ReleaseForSessionWithGuard(account, affinityKey, affinityGuard)
