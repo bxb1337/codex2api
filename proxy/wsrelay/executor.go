@@ -279,13 +279,14 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	e.manager.StartHeartbeat(wc)
 
 	return &WsResponse{
-		conn:        wc,
-		pendingReq:  pr,
-		sessionID:   poolSessionID,
-		manager:     e.manager,
-		apiKey:      apiKey,
-		model:       gjson.GetBytes(wsBody, "model").String(),
-		readErrChan: make(chan error, 1),
+		forwardInterrupt: proxy.CodexResponsesLiteEnabled(wsBody),
+		conn:             wc,
+		pendingReq:       pr,
+		sessionID:        poolSessionID,
+		manager:          e.manager,
+		apiKey:           apiKey,
+		model:            gjson.GetBytes(wsBody, "model").String(),
+		readErrChan:      make(chan error, 1),
 	}, nil
 }
 
@@ -460,13 +461,14 @@ func (e *Executor) sendRequest(wc *WsConnection, body []byte, requestID string) 
 
 // WsResponse WebSocket 响应包装器
 type WsResponse struct {
-	model       string
-	conn        *WsConnection
-	pendingReq  *PendingRequest
-	sessionID   string
-	manager     *Manager
-	readErrChan chan error
-	closed      bool
+	forwardInterrupt bool
+	model            string
+	conn             *WsConnection
+	pendingReq       *PendingRequest
+	sessionID        string
+	manager          *Manager
+	readErrChan      chan error
+	closed           bool
 	// apiKey 发起本请求的下游 API Key，用于 response_id → 连接绑定的归属校验。
 	apiKey string
 	// connBroken 标记读流因上游 WS 异常(非正常关闭)或下游写入失败而终止；
@@ -806,6 +808,7 @@ func websocketResponseToHTTP(ctx context.Context, wsResp *WsResponse, statusCode
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	controls := registerResponsesWebSocketControl(ctx, wsResp)
 
 	pr, pw := io.Pipe()
 	resp := &http.Response{
@@ -847,8 +850,10 @@ func websocketResponseToHTTP(ctx context.Context, wsResp *WsResponse, statusCode
 		defer close(done)
 		defer pw.Close()
 		defer wsResp.Close()
+		defer controls.Close()
 
 		err := wsResp.ReadStream(func(data []byte) bool {
+			controls.Observe(data)
 			// 上游回带的 turn state 只在帧里（握手头是建连时的旧快照），逐帧观测记进追踪。
 			proxy.ObserveCodexTurnStateFrame(ctx, data)
 			// SSE 的 data: 负载以换行为界，含换行的帧（如 pretty-printed JSON）
