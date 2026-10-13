@@ -1256,9 +1256,6 @@ func (h *Handler) streamResponsesWSUpstream(
 		if interactive && viaWebsocket && eventType == "error" {
 			terminalFailurePayload = append([]byte(nil), data...)
 			terminalFailureEventType, gotTerminal = eventType, true
-			if responsesWSTurnFailureHidden(c) {
-				return false
-			}
 		}
 		if wsReplay != nil {
 			// Continuous retry keeps the complete attempt private. Any upstream

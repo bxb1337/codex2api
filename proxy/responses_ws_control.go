@@ -35,7 +35,6 @@ type responsesWSControlSession struct {
 	mu       sync.Mutex
 	conn     *websocket.Conn
 	active   map[string]*responsesWSControlTurn
-	lanes    map[string]*responsesWSLane
 	recent   map[string]struct{}
 	order    []string
 	next     int
@@ -57,7 +56,6 @@ type responsesWSControlTurn struct {
 func newResponsesWSControlSession(conn *websocket.Conn) *responsesWSControlSession {
 	return &responsesWSControlSession{
 		conn: conn, recent: make(map[string]struct{}), active: make(map[string]*responsesWSControlTurn),
-		lanes:    make(map[string]*responsesWSLane),
 		messages: make(chan responsesWSInboundMessage, responsesWSInboundQueueCapacity),
 		done:     make(chan struct{}),
 	}
@@ -90,11 +88,7 @@ func (s *responsesWSControlSession) drain() {
 
 func interceptResponsesWSControl(ctx context.Context, message responsesWSInboundMessage) bool {
 	s, _ := ctx.Value(responsesWSControlSessionKey{}).(*responsesWSControlSession)
-	if s == nil {
-		return false
-	}
-	kind := gjson.GetBytes(message.payload, "type").String()
-	if kind != "response.interrupt" && kind != "response.steer" {
+	if s == nil || gjson.GetBytes(message.payload, "type").String() != "response.interrupt" {
 		return false
 	}
 	select {
