@@ -113,7 +113,7 @@ func executeOpenAIResponsesWebsocket(ctx context.Context, account *auth.Account,
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := ConsumeAPIKeyModelRequestQuota(ctx, gjson.GetBytes(requestBody, "model").String()); err != nil {
+	if err := ConsumeResponsesModelRequestQuota(ctx, requestBody); err != nil {
 		return nil, err
 	}
 	wsURL, err := openAIResponsesWebsocketURL(baseURL)
