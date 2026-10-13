@@ -559,7 +559,11 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	// lite 信号收敛：签名在 payload 规则改写后采集（规则可注入/删除 WS 标记，改写
 	// 前采集会让注入失效、删除被回填），模型也已被入口映射/规则定稿——已知不支持
 	// lite 的模型带信号上游必 400，发出前剥离。
-	responsesLite := gateResponsesLiteForAccount(codexResponsesLiteRequested(requestBody, headers), requestBody, account)
+	liteRequested := codexResponsesLiteRequested(requestBody, headers)
+	responsesLite := gateResponsesLiteForAccount(liteRequested, requestBody, account)
+	if liteRequested && !responsesLite {
+		requestBody = normalizeNonLiteResponsesBody(requestBody)
+	}
 	wantWebsocket := CurrentRuntimeSettings().CodexForceWebsocket
 	if len(useWebsocket) > 0 {
 		wantWebsocket = useWebsocket[0]
@@ -817,8 +821,12 @@ func ExecuteOpenAIResponsesRequest(ctx context.Context, account *auth.Account, r
 	var encryptedAttempt *encryptedContentAttempt
 	requestBody, encryptedAttempt = prepareEncryptedContentAttempt(ctx, account, requestBody, "", headers)
 	defer func() { encryptedAttempt.observeResponse(upstreamResponse, requestBody) }()
-	responsesLite := gateResponsesLiteForAccount(codexResponsesLiteRequested(requestBody, headers), requestBody, account)
-	requestBody, headers = prepareCodexResponsesLiteTransport(requestBody, headers, false, responsesLite)
+	liteRequested := codexResponsesLiteRequested(requestBody, headers)
+	responsesLite := gateResponsesLiteForAccount(liteRequested, requestBody, account)
+	if liteRequested && !responsesLite {
+		requestBody = normalizeNonLiteResponsesBody(requestBody)
+	}
+	requestBody, headers = prepareCodexResponsesLiteTransport(requestBody, headers, openAIResponsesRelayUsesUpstreamWebsocket(account, requestBody), responsesLite)
 	requestBody = normalizeCompactionTriggerFinal(requestBody, false)
 
 	baseURL, apiKey := account.OpenAIResponsesCredentials()
