@@ -12,8 +12,8 @@ func validateResponsesWSCreateEnvelope(payload []byte) *api.APIError {
 	if !uniqueResponsesWSFields(payload) {
 		return responsesWSInterruptError("WebSocket create must be an object with unique fields", "type")
 	}
-	if _, apiErr := responsesWSCreateStreamID(payload); apiErr != nil {
-		return apiErr
+	if gjson.GetBytes(payload, "stream_id").Exists() {
+		return responsesWSInterruptError("stream_id is not supported by the Codex CLI WebSocket protocol", "stream_id")
 	}
 	generate := gjson.GetBytes(payload, "generate")
 	if generate.Exists() && generate.Type != gjson.True && generate.Type != gjson.False {

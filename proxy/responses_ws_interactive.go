@@ -13,6 +13,5 @@ func responsesWSInteractive(c *gin.Context) bool {
 	body, _ := raw.([]byte)
 	model := strings.ToLower(gjson.GetBytes(body, "model").String())
 	supports, known := responsesLiteSupportForModel(model)
-	return gjson.GetBytes(body, "stream_id").String() != "" || strings.HasPrefix(model, "gpt-6") ||
-		known && supports || gateResponsesLiteForModel(codexResponsesLiteRequested(body, c.Request.Header), body)
+	return known && supports || gateResponsesLiteForModel(codexResponsesLiteRequested(body, c.Request.Header), body)
 }
