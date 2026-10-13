@@ -1198,8 +1198,9 @@ func (h *Handler) streamResponsesWSUpstream(
 	emptyIncomplete := &emptyIncompleteTracker{}
 	terminalFailureEventType := ""
 	wroteAnyBody := false
+	interactive := responsesWSInteractive(c)
 	var wsReplay *continuousRetryWSReplay
-	if continuousRetryBuffersAttempts(continuousRetryPolicy) {
+	if continuousRetryBuffersAttempts(continuousRetryPolicy) && !interactive {
 		wsReplay = h.newContinuousRetryWSReplay()
 	}
 	finishContextCommit := func() {}
@@ -1298,6 +1299,10 @@ func (h *Handler) streamResponsesWSUpstream(
 			gotTerminal = true
 			preContentErrorCandidate = nil
 		}
+		if interactive && viaWebsocket && eventType == "error" {
+			terminalFailurePayload = append([]byte(nil), data...)
+			terminalFailureEventType, gotTerminal = eventType, true
+		}
 		if wsReplay != nil {
 			// Continuous retry keeps the complete attempt private. Any upstream
 			// error event is authoritative and ends the attempt immediately, even if
@@ -1339,7 +1344,7 @@ func (h *Handler) streamResponsesWSUpstream(
 			// previous_response_not_found 的先导 error 帧同样缓冲：它按 invalid_request
 			// 分类不属于可重试帧，立即写出会置位 wroteAnyBody，随后的 response.failed
 			// 就进不了下面的续链降级分支。
-			shouldDefer := shouldDeferPreContentSSEEvent(eventType, contentTokenSeen, gotTerminal, preflightPassthrough) ||
+			shouldDefer := (!interactive && shouldDeferPreContentSSEEvent(eventType, contentTokenSeen, gotTerminal, preflightPassthrough)) ||
 				(!contentTokenSeen && !wroteAnyBody && !gotTerminal && isRetryableUpstreamErrorFrame(eventType, data, continuousRetryPolicy)) ||
 				(allowContinuationDegrade && !contentTokenSeen && !gotTerminal && eventType == "error" && isPreviousResponseNotFoundBody(data))
 			if shouldDefer {
@@ -1724,6 +1729,9 @@ func normalizeResponsesWebSocketClientPayload(raw []byte) ([]byte, string, *api.
 	}
 	if !gjson.ValidBytes(trimmed) {
 		return nil, "", api.NewAPIError(api.ErrCodeInvalidRequest, "invalid websocket request payload", api.ErrorTypeInvalidRequest)
+	}
+	if apiErr := validateResponsesWSCreateEnvelope(trimmed); apiErr != nil {
+		return nil, "", apiErr
 	}
 
 	eventType := strings.TrimSpace(gjson.GetBytes(trimmed, "type").String())
