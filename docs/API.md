@@ -229,7 +229,7 @@ Messages 的 `tool_use.input` 必须使用对象，因此自由文本工具输�
 
 OpenAI Responses 中转账号默认仍用 HTTP POST `/v1/responses`。账号设置 `responses_upstream_transport=websocket` 后，这个账号的 Responses 出站改为 WebSocket：地址由 Base URL 换成 `ws`/`wss`，路径仍是 `/v1/responses`，握手使用该账号的 API Key 和 `OpenAI-Beta: responses_websockets=2026-02-06`，上行帧为 `response.create`。这个开关只作用于 OpenAI Responses 中转账号，和全局 `codex_force_websocket` 无关；Grok、Antigravity、Claude 不会走这条连接。握手失败返回上游状态或传输错误，不会改回 HTTP。生图请求仍走 HTTP。连接按账号、Base URL 和 API Key 隔离；带 `previous_response_id` 时优先复用产出该响应的连接。客户端 `GET /v1/responses` 也会选中已打开该开关的中转账号。
 
-原生 WebSocket 入口为 `GET /v1/responses`。通过校验与 API Key 限制后，较新的同 API Key、同渠道/分组路由作用域、同会话请求会抢占仍在运行的旧请求，并先取消旧上游以释放账号与并发位。`stream_id` 是抢占键的一部分，因此多路复用的不同流互不影响；不同 API Key 或不同路由作用域也不会互相取消。只有 `prompt_cache_key`、显式会话头、`previous_response_id`、turn state、专用 affinity key 或可稳定派生的内容会话存在时才启用，纯 API Key 兜底身份不会把无关请求合并。Redis 模式支持跨实例抢占，Memory 模式仅在当前进程内生效。
+原生 WebSocket 入口为 `GET /v1/responses`，兼容范围以官方 Codex CLI 的 Responses 实现为准。同一连接的 `response.create` 顺序执行，`response.interrupt` 独立于 create 队列处理；不支持公开 `response.steer` 或 `stream_id` 命名流。通过校验与 API Key 限制后，较新的同 API Key、同渠道/分组路由作用域、同会话请求会抢占仍在运行的旧请求，并先取消旧上游以释放账号与并发位；不同 API Key 或不同路由作用域不会互相取消。只有 `prompt_cache_key`、显式会话头、`previous_response_id`、turn state、专用 affinity key 或可稳定派生的内容会话存在时才启用，纯 API Key 兜底身份不会把无关请求合并。Redis 模式支持跨实例抢占，Memory 模式仅在当前进程内生效。
 
 Codex 在生成过程中追加消息时，可在同一连接发送 `response.interrupt`（单数），其中 `response_id` 来自当前 `response.created` 的 `response.id`：
 
@@ -239,23 +239,11 @@ Codex 在生成过程中追加消息时，可在同一连接发送 `response.int
 
 该控制帧独立于 `response.create` 队列处理，不要求 `model`，不新增模型请求计数。最终出站启用 Responses Lite 时，网关立即转发到当前轮次持有的上游 WebSocket，继续交付上游的中断确认、输出项中断事件及 `response.incomplete` 终态；普通 Responses、模型映射或账号能力门禁剥离 Lite 的请求，以及 HTTP 上游回退，沿用 Codex 的读取到终态再续接流程。OpenAI Responses 中转账号按最终模型与出站 Lite 信号选择同样的流程，WS 的 Lite 信号写入每个 create 帧，连接复用也不会沿用旧握手信号。模型门禁关闭 Lite 时，`additional_tools` 转回顶层工具声明，并移除仅适用于 Lite 的 `reasoning.context=all_turns`。客户端收到终态后可使用 `previous_response_id` 续接。`incomplete_details.reason` 为 `interrupted`、`steered`、`content_filter` 或 `max_messages` 的零输出响应保留原始终态和 usage，不改写为失败或触发透明重试。
 
-中断只能作用于本连接对应流的当前响应；重复中断和最近 64 个已结束响应的迟到中断会被忽略，避免干扰下一轮。无效响应 ID、未知字段或不支持的 mode 返回错误帧并保持连接，提供 `event_id` 时错误帧会携带它。
+中断只能作用于本连接的当前响应；重复中断和最近 64 个已结束响应的迟到中断会被忽略，避免干扰下一轮。无效响应 ID、未知字段或不支持的 mode 返回错误帧并保持连接，提供 `event_id` 时错误帧会携带它。
 
-命名流在 create 帧中指定 `stream_id`，例如 `{"type":"response.create","stream_id":"planner","model":"gpt-6-astra","input":"制定计划"}`。不同流可并行，同一流内的 create 按收到的顺序执行；每条连接最多同时执行 16 个响应，最多接受 32 个不同的命名流，省略字段时使用默认流。`stream_id` 长度为 1–256，只允许 ASCII 字母、数字、下划线、连字符和句点。命名流的响应和请求错误都携带其 `stream_id`，某个流的请求失败不会关闭其他流。API Key、scope 和账号并发限制仍按每个实际请求执行。连接级鉴权失效、断连或输入过载会取消整条连接的请求；未命名的旧版非交互客户端保留原来的错误关闭策略。
+Lite 能力轮次及时下发 `response.created`，使 CLI 能取得当前响应 ID 并发送 interrupt。此类轮次不使用连续重试的整轮私有缓冲；公开生命周期后不会静默换号重放。响应尚未开始时，HTTP/传输层故障仍按配置重试。普通非交互轮次继续使用原有重试缓冲。CLI 读取完当前终态后，自行发送带 `previous_response_id` 和增量 input 的下一次 create，网关不自动创建后继响应。
 
-命名流、GPT-6 和 Lite 能力轮次及时下发 `response.created`，使客户端能取得当前响应 ID。此类交互轮次不使用连续重试的整轮私有缓冲；公开生命周期后不会静默换号重放。响应尚未开始时，HTTP/传输层故障仍按配置重试。普通非交互轮次继续使用原有重试缓冲。
-
-GPT-6 生成过程中可发送公开协议的 `response.steer`：
-
-```json
-{"type":"response.steer","previous_response_id":"resp_...","input":"把范围缩小到两周内可以完成"}
-```
-
-steer 仅接受 `type`、`previous_response_id`、`input`，目标响应决定所属流，不发送 `stream_id`。input 可以是非空文本，也可以是非空的 user 消息数组；消息仅接受 type/role/content，内容支持 `input_text`、`input_image`、`input_file`。网关返回 `response.steer.accepted` 和提交 ID，在父响应安全结束后自动用新输入续接，并继承原请求的设置；父响应可正常 completed，不撤销已经发送的输出或工具工作。客户端继续读取后继响应，不必额外发送 create。
-
-父响应需要客户端工具结果或审批时，网关在其 completed 后发送 `response.steer.pending`，其中 `required_input` 标识所需的 function/custom/computer/shell/apply-patch/tool-search 结果或 MCP 审批。客户端在同一流发送带原 `previous_response_id` 的 create 并提交这些结果，已接受的 steering 输入会按顺序自动前置，显式 create 保留自己的设置。每个提交最多通知一次 pending。后继 `response.created` 是输入提交成功的确认；确认前的失败返回 `response.steer.failed`、原输入和原提交 ID。无效输入、模型不支持或过多的待处理输入也返回 failed，拒绝前尚未分配 ID 的事件不带 ID。待处理 steering 仅存在于当前连接中，断连后客户端应根据已经收到的事件判断是否需要重发。
-
-`generate:false` 预热不会消耗模型生成次数，也不记为生成成功或生成用量。需要回退到 HTTP 时，网关返回本地预热终态并保留可恢复的输入快照，不发送真实模型生成；后续请求可用该 ID 续接，恢复仍受上下文缓存和账号兼容性限制。实际 HTTP 出站删除 `type`、`generate`、`stream_id`，下游命名流的事件关联由网关补齐。create 的 generate 必须是布尔值，顶层重复字段会被拒绝，避免校验和实际生成采用不同的参数解释。
+`generate:false` 预热不会消耗模型生成次数，也不记为生成成功或生成用量。需要回退到 HTTP 时，网关返回本地预热终态并保留可恢复的输入快照，不发送真实模型生成；后续请求可用该 ID 续接，恢复仍受上下文缓存和账号兼容性限制。实际 HTTP 出站清理 `type`、`generate`、`stream_id` 等传输字段。create 的 generate 必须是布尔值，顶层重复字段会被拒绝，避免校验和实际生成采用不同的参数解释。
 
 **响应示例:**
 
